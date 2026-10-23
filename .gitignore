@@ -1,0 +1,10 @@
+# PlatformIO
+.pio
+.vscode
+
+# Temporary debugging & dump artifacts
+*.jlink
+*.log
+*.txt
+-rttaddr
+__pycache__/
