@@ -26,111 +26,157 @@ static RTTStream rtt;
 HardwareSerial SerialUART1(USART1);
 #endif
 
-// ============================================================================
-// FNIRSI DSO-TC2 HARDWARE PIN DEFINITIONS (STM32L083RZ LQFP-64)
-// ============================================================================
-// Front Panel Buttons (Active LOW, all contiguous on Pins 34..41!)
-#define PIN_BTN_PWR    PB13   // Pin 34: POWER Button
-#define PIN_BTN_OK     PB14   // Pin 35: OK / ENTER Button (Left Navigation <)
-#define PIN_BTN_MENU   PB15   // Pin 36: MENU / AUTO Button
-#define PIN_BTN_UP     PC8    // Pin 39: UP Button (^)
-#define PIN_BTN_DOWN   PC9    // Pin 40: DOWN Button (v)
-#define PIN_BTN_TEST   PA8    // Pin 41: TEST / HOLD Button (Right Navigation >)
+// Power hold & peripherals
+#define PIN_PWR_HOLD   PB7
+#define PIN_BACKLIGHT  PC7
+#define PIN_BUZZER     PC6
+#define PIN_RELAY      PB6
+#define PIN_IR_RX      PB9
 
-// Hardware Peripherals
-#define PIN_BUZZER     PC6    // Pin 37: Audio Generator (Active / Passive buzzer)
-#define PIN_BACKLIGHT  PC7    // Pin 38: LCD Backlight (TIM22_CH2 PWM / GPIO)
-#define PIN_RELAY      PB6    // Pin 58: Oscilloscope Solid-State Relay / Range Switch
-#define PIN_PWR_HOLD   PB7    // Pin 59: Power-Hold Soft-Latch (Active HIGH)
-#define PIN_IR_RX      PB9    // Pin 62: 38 kHz Demodulated Infrared Receiver
+// Buttons
+#define PIN_BTN_PWR    PB13
+#define PIN_BTN_OK     PB14
+#define PIN_BTN_MENU   PB15
+#define PIN_BTN_UP     PC8
+#define PIN_BTN_DOWN   PC9
+#define PIN_BTN_TEST   PA8
 
-static uint8_t backlight_level = 255;
-static bool relay_state = false;
+// Direct PinName definitions for ADC
+extern "C" uint16_t adc_read_value(PinName pin, uint32_t resolution);
 
-// ============================================================================
-// BUZZER & AUDIO GENERATOR ENGINE
-// ============================================================================
-// Square-wave audio generation for passive piezo transducers
-static void beep_square(uint16_t freq_hz = 2700, uint16_t dur_ms = 40) {
-    if (freq_hz == 0 || dur_ms == 0) return;
-    uint32_t half_period_us = 1000000UL / (2 * freq_hz);
-    if (half_period_us == 0) half_period_us = 1;
-    uint32_t cycles = ((uint32_t)dur_ms * 1000UL) / (2 * half_period_us);
-    
-    for (uint32_t i = 0; i < cycles; i++) {
-        digitalWrite(PIN_BUZZER, HIGH);
-        delayMicroseconds(half_period_us);
-        digitalWrite(PIN_BUZZER, LOW);
-        delayMicroseconds(half_period_us);
+static uint32_t read_adc(PinName pin) {
+    return adc_read_value(pin, 12);
+}
+
+// Resistor Mapping storage
+struct ResistorMap {
+    char rl_name[8];
+    char rh_name[8];
+};
+static ResistorMap socket_map[3] = {
+    {"???", "???"},
+    {"???", "???"},
+    {"???", "???"}
+};
+
+struct CandidatePin {
+    const char* name;
+    uint32_t pin;
+};
+
+static const CandidatePin CANDIDATES[] = {
+    // Port C
+    {"PC0", PC0}, {"PC1", PC1}, {"PC2", PC2}, {"PC3", PC3},
+    {"PC4", PC4}, {"PC5", PC5}, {"PC10", PC10}, {"PC11", PC11},
+    {"PC12", PC12}, {"PC13", PC13},
+    // Port B
+    {"PB0", PB0}, {"PB1", PB1}, {"PB2", PB2}, {"PB8", PB8},
+    {"PB10", PB10}, {"PB11", PB11}, {"PB12", PB12},
+    // Port A
+    {"PA0", PA0}, {"PA1", PA1}, {"PA2", PA2}, {"PA6", PA6},
+    {"PA7", PA7}, {"PA11", PA11}, {"PA12", PA12}, {"PA15", PA15},
+    // Port D
+    {"PD2", PD2}
+};
+static const size_t NUM_CANDIDATES = sizeof(CANDIDATES) / sizeof(CANDIDATES[0]);
+
+static void scan_resistors() {
+    rtt.println("\n========================================================");
+    rtt.println("   SCANNING FOR COMPONENT TESTER RESISTOR NETWORKS      ");
+    rtt.println("   SOCKET 1: PA3 | SOCKET 2: PA4 | SOCKET 3: PA5       ");
+    rtt.println("========================================================");
+
+    // Set all candidates to floating inputs
+    for (size_t i = 0; i < NUM_CANDIDATES; i++) {
+        pinMode(CANDIDATES[i].pin, INPUT);
     }
-}
 
-// Steady DC pulse for active buzzers
-static void beep_dc(uint16_t dur_ms = 30) {
-    digitalWrite(PIN_BUZZER, HIGH);
-    delay(dur_ms);
-    digitalWrite(PIN_BUZZER, LOW);
-}
+    const PinName SOCKS[3] = {PA_3, PA_4, PA_5};
 
-// Universal key-click sound: generates both a DC pulse and an AC chirp
-// Guarantees audible click regardless of active or passive buzzer type
-static void beep_click() {
-    beep_dc(15);
-    beep_square(2800, 15);
-}
+    for (size_t s = 0; s < 3; s++) {
+        PinName sock_pin = SOCKS[s];
+        const char* sock_str = (s == 0 ? "PA3" : s == 1 ? "PA4" : "PA5");
+        rtt.printf("\n--- PROBING SOCKET %d (%s) ---\n", s + 1, sock_str);
 
-#define VREFINT_CAL_ADDR ((uint16_t*)((uint32_t)0x1FF80078))
-#define VREFINT_CAL_VREF 3000
+        uint32_t best_rl_delta = 0;
+        const char* best_rl_name = "???";
+        uint32_t best_rh_delta = 0;
+        const char* best_rh_name = "???";
 
-static uint32_t read_vcc_mv() {
-    analogReadResolution(12);
-    uint32_t raw_vref = analogRead(AVREF);
-    if (raw_vref == 0) return 3300;
-    uint32_t cal = *VREFINT_CAL_ADDR;
-    if (cal == 0 || cal == 0xFFFF) cal = 1662;
-    return (VREFINT_CAL_VREF * cal) / raw_vref;
+        for (size_t i = 0; i < NUM_CANDIDATES; i++) {
+            uint32_t p = CANDIDATES[i].pin;
+            const char* name = CANDIDATES[i].name;
+
+            // Drive candidate HIGH
+            pinMode(p, OUTPUT);
+            digitalWrite(p, HIGH);
+            delay(3);
+            uint32_t val_high = read_adc(sock_pin);
+
+            // Drive candidate LOW
+            digitalWrite(p, LOW);
+            delay(3);
+            uint32_t val_low = read_adc(sock_pin);
+
+            // Restore candidate to floating INPUT
+            pinMode(p, INPUT);
+
+            int32_t delta = (int32_t)val_high - (int32_t)val_low;
+
+            if (delta > 80) {
+                rtt.printf("   Candidate %-5s -> HIGH=%4lu, LOW=%4lu, DELTA=+%4ld\n",
+                           name, val_high, val_low, delta);
+
+                if (delta > 2500) {
+                    if ((uint32_t)delta > best_rl_delta) {
+                        best_rl_delta = (uint32_t)delta;
+                        best_rl_name = name;
+                    }
+                } else if (delta > 150 && delta < 2200) {
+                    if ((uint32_t)delta > best_rh_delta) {
+                        best_rh_delta = (uint32_t)delta;
+                        best_rh_name = name;
+                    }
+                }
+            }
+        }
+
+        strncpy(socket_map[s].rl_name, best_rl_name, sizeof(socket_map[s].rl_name) - 1);
+        strncpy(socket_map[s].rh_name, best_rh_name, sizeof(socket_map[s].rh_name) - 1);
+        rtt.printf(">> SOCKET %d (%s) RESULT: RL (~680 ohm) = %s, RH (~470k) = %s\n",
+                   s + 1, sock_str, best_rl_name, best_rh_name);
+    }
+
+    rtt.println("\n--------------------------------------------------------");
+    rtt.println("   COMPONENT TESTER RESISTOR MAPPING SUMMARY:           ");
+    for (int s = 0; s < 3; s++) {
+        rtt.printf("   Socket %d (PA%d): RL=%-5s  RH=%-5s\n",
+                   s + 1, s + 3, socket_map[s].rl_name, socket_map[s].rh_name);
+    }
+    rtt.println("--------------------------------------------------------\n");
 }
 
 void setup() {
-    // 1. Immediately latch battery power ON via PB7
     pinMode(PIN_PWR_HOLD, OUTPUT);
     digitalWrite(PIN_PWR_HOLD, HIGH);
 
-    // 2. Turn on LCD Backlight via PC7
     pinMode(PIN_BACKLIGHT, OUTPUT);
     digitalWrite(PIN_BACKLIGHT, HIGH);
 
-    // 3. Initialize Buzzer on PC6 (idle LOW)
     pinMode(PIN_BUZZER, OUTPUT);
     digitalWrite(PIN_BUZZER, LOW);
 
-    // 4. Oscilloscope Relay / Switch (PB6, default LOW)
     pinMode(PIN_RELAY, OUTPUT);
     digitalWrite(PIN_RELAY, LOW);
 
-    // 5. Infrared Receiver (PB9, idle HIGH)
     pinMode(PIN_IR_RX, INPUT_PULLUP);
 
-    // 6. Configure all 6 physical buttons with internal pullups
     pinMode(PIN_BTN_PWR,  INPUT_PULLUP);
     pinMode(PIN_BTN_OK,   INPUT_PULLUP);
     pinMode(PIN_BTN_TEST, INPUT_PULLUP);
     pinMode(PIN_BTN_UP,   INPUT_PULLUP);
     pinMode(PIN_BTN_DOWN, INPUT_PULLUP);
     pinMode(PIN_BTN_MENU, INPUT_PULLUP);
-
-    // Startup Sound (Tests both DC active buzzer and AC frequency chirp)
-    beep_dc(80);
-    delay(40);
-    beep_square(2000, 50);
-    delay(30);
-    beep_square(2800, 60);
-    delay(30);
-    beep_square(3600, 80);
-
-    Serial.setRx(PA3);
-    Serial.setTx(PA2);
-    Serial.begin(38400);
 
 #if defined(USART1)
     SerialUART1.setRx(PA10);
@@ -139,170 +185,51 @@ void setup() {
 #endif
 
     rtt.println("\n\n========================================================");
-    rtt.println("   FNIRSI DSO-TC2 COMPLETE HARDWARE ENGINE ONLINE       ");
-    rtt.println("   POWER LATCH: PB7=HIGH | BACKLIGHT: PC7=HIGH          ");
-    rtt.println("   RELAY: PB6            | IR RECEIVER: PB9             ");
-    rtt.println("   BUZZER: PC6 (Active/Passive Dual-Driver)             ");
-    rtt.println("   PWR=PB13, OK=PB14, TEST=PA8, UP=PC8, DN=PC9, MN=PB15 ");
+    rtt.println("   DSO-TC2 COMPONENT TESTER RESISTOR SCANNER ONLINE     ");
     rtt.println("========================================================\n");
+
+    scan_resistors();
 }
 
 void loop() {
-    // Read hardware registers directly for zero latency
     uint16_t ra = (uint16_t)GPIOA->IDR;
     uint16_t rb = (uint16_t)GPIOB->IDR;
     uint16_t rc = (uint16_t)GPIOC->IDR;
 
-    // 1. Decode all 6 physical front buttons (active LOW)
-    bool b_up    = !(rc & (1U << 8));   // PC8
-    bool b_down  = !(rc & (1U << 9));   // PC9
-    bool b_ok    = !(rb & (1U << 14));  // PB14: OK / ENTER (Left button <)
-    bool b_test  = !(ra & (1U << 8));   // PA8:  TEST / HOLD (Right button >)
-    bool b_menu  = !(rb & (1U << 15));  // PB15: MENU / AUTO
-    bool b_pwr   = !(rb & (1U << 13));  // PB13: POWER button
+    bool b_up    = !(rc & (1U << 8));
+    bool b_down  = !(rc & (1U << 9));
+    bool b_ok    = !(rb & (1U << 14));
+    bool b_test  = !(ra & (1U << 8));
+    bool b_menu  = !(rb & (1U << 15));
+    bool b_pwr   = !(rb & (1U << 13));
 
-    // 2. Infrared Receiver on PB9 (pulled LOW by demodulated 38 kHz carrier)
-    bool ir_pulse = !(rb & (1U << 9));  // PB9
-    static uint32_t last_ir_time = 0;
-    static uint32_t ir_pulse_count = 0;
-    static bool prev_ir_pulse = false;
-    if (ir_pulse && !prev_ir_pulse) {
-        ir_pulse_count++;
-        last_ir_time = millis();
-        beep_square(3200, 10);
-        rtt.printf(">> [IR EVENT] Pulse detected on PB9! Total pulses: %lu\n", ir_pulse_count);
-    }
-    prev_ir_pulse = ir_pulse;
-    bool ir_active = (millis() - last_ir_time < 300);
-
-    // 3. Oscilloscope Relay Control (PB6): Hold MENU and press TEST (PA8) to toggle
-    static uint32_t last_relay_toggle = 0;
-    if (b_menu && b_test && (millis() - last_relay_toggle > 400)) {
-        last_relay_toggle = millis();
-        relay_state = !relay_state;
-        digitalWrite(PIN_RELAY, relay_state ? HIGH : LOW);
-        beep_square(relay_state ? 4000 : 1600, 30);
-        rtt.printf(">> [RELAY PB6] Toggled to: %s\n", relay_state ? "ON (HIGH)" : "OFF (LOW)");
+    // Press TEST to re-run scan
+    static uint32_t last_scan = 0;
+    if (b_test && (millis() - last_scan > 1000)) {
+        last_scan = millis();
+        scan_resistors();
     }
 
-    // 4. Diagnostic Buzzer Test: Hold MENU and press OK (PB14) to trigger multi-mode test
-    static uint32_t last_buzz_test = 0;
-    if (b_menu && b_ok && (millis() - last_buzz_test > 1000)) {
-        last_buzz_test = millis();
-        rtt.println(">> [BUZZER TEST RUNNING]");
-        rtt.println(">> Step 1: DC HIGH 150ms (active buzzer test)");
-        beep_dc(150);
-        delay(100);
-        rtt.println(">> Step 2: 2.7kHz Square Wave 200ms (passive buzzer test)");
-        beep_square(2700, 200);
-        delay(100);
-        rtt.println(">> Step 3: DC LOW 150ms (inverted test)");
-        digitalWrite(PIN_BUZZER, LOW);
-        delay(150);
-        digitalWrite(PIN_BUZZER, HIGH);
-        delay(50);
-        digitalWrite(PIN_BUZZER, LOW);
-        rtt.println(">> [BUZZER TEST COMPLETE]");
-    }
-
-    // 5. Soft Power-Off: Hold POWER button for > 1.5 seconds
-    static uint32_t pwr_press_start = 0;
-    if (b_pwr) {
-        if (pwr_press_start == 0) pwr_press_start = millis();
-        if (millis() - pwr_press_start > 1500) {
-            rtt.println(">> [POWER] Long press detected! Shutting down system...");
-            beep_square(3600, 80);
-            delay(40);
-            beep_square(2400, 80);
-            delay(40);
-            beep_square(1200, 120);
-            // Release soft latch
-            digitalWrite(PIN_PWR_HOLD, LOW);
-            digitalWrite(PIN_BACKLIGHT, LOW);
-            while (1) {
-                digitalWrite(PIN_PWR_HOLD, LOW);
-                delay(100);
-            }
-        }
-    } else {
-        pwr_press_start = 0;
-    }
-
-    // 6. Pack into 8-bit status mask
-    // bit 0: UP, bit 1: DOWN, bit 2: OK, bit 3: TEST, bit 4: MENU, bit 5: POWER, bit 6: RELAY, bit 7: IR_ACTIVE
-    uint8_t btn_mask = (b_up        ? 0x01 : 0) |
-                       (b_down      ? 0x02 : 0) |
-                       (b_ok        ? 0x04 : 0) |
-                       (b_test      ? 0x08 : 0) |
-                       (b_menu      ? 0x10 : 0) |
-                       (b_pwr       ? 0x20 : 0) |
-                       (relay_state ? 0x40 : 0) |
-                       (ir_active   ? 0x80 : 0);
-
-    const char* active_btn = "NONE";
-    const char* active_pin = "NONE";
-
-    if (b_pwr)            { active_btn = "POWER"; active_pin = "PB13"; }
-    else if (b_ok)        { active_btn = "OK";    active_pin = "PB14"; }
-    else if (b_test)      { active_btn = "TEST";  active_pin = "PA8";  }
-    else if (b_up)        { active_btn = "UP";    active_pin = "PC8";  }
-    else if (b_down)      { active_btn = "DOWN";  active_pin = "PC9";  }
-    else if (b_menu)      { active_btn = "MENU";  active_pin = "PB15"; }
-    else if (ir_active)   { active_btn = "IR_RX"; active_pin = "PB9";  }
-
-    // Print to RTT on button transitions & play key click sound
-    static uint8_t prev_mask = 0;
-    uint8_t current_keys = btn_mask & 0x3F;
-    uint8_t prev_keys    = prev_mask & 0x3F;
-
-    if (current_keys != prev_keys) {
-        if (current_keys > prev_keys) {
-            beep_click(); // Play click sound
-        }
-        prev_mask = btn_mask;
-        if (current_keys != 0) {
-            rtt.printf(">> [KEY EVENT] ACTIVE: %s (PIN: %s, MASK: 0x%02X)\n",
-                       active_btn, active_pin, btn_mask);
-        } else {
-            rtt.println(">> [KEY EVENT] ALL RELEASED (IDLE)");
-        }
-    }
-
-    // Backlight adjustment: Hold MENU and press UP or DOWN
-    static uint32_t last_bl_change = 0;
-    if (b_menu && (millis() - last_bl_change > 150)) {
-        if (b_up && backlight_level < 255) {
-            backlight_level = (backlight_level > 230) ? 255 : (backlight_level + 25);
-            analogWrite(PIN_BACKLIGHT, backlight_level);
-            last_bl_change = millis();
-            beep_square(3600, 15);
-            rtt.printf(">> Backlight UP: %u/255\n", backlight_level);
-        } else if (b_down && backlight_level > 30) {
-            backlight_level = (backlight_level < 55) ? 30 : (backlight_level - 25);
-            analogWrite(PIN_BACKLIGHT, backlight_level);
-            last_bl_change = millis();
-            beep_square(1800, 15);
-            rtt.printf(">> Backlight DOWN: %u/255\n", backlight_level);
-        }
-    }
-
-    // 25 Hz Telemetry Packet to Display MCU
+    // 25 Hz Telemetry to Display
     static uint32_t last_tx = 0;
     static uint32_t seq = 0;
-
     if (millis() - last_tx >= 40) {
         last_tx = millis();
         seq++;
-        uint32_t vcc = read_vcc_mv();
 
-        // Packet format: #TC2:<seq>,<btn_str>,<pin_str>,<mask_hex>,<bl_val>,<vcc>,<uptime>*\n
-        char buf[128];
-        snprintf(buf, sizeof(buf), "#TC2:%lu,%s,%s,%02X,%u,%lu,%lu*\n",
-                 seq, active_btn, active_pin, btn_mask, backlight_level, vcc, millis());
+        uint8_t btn_mask = (b_up ? 0x01 : 0) | (b_down ? 0x02 : 0) |
+                           (b_ok ? 0x04 : 0) | (b_test ? 0x08 : 0) |
+                           (b_menu ? 0x10 : 0) | (b_pwr ? 0x20 : 0);
+
+        char buf[160];
+        snprintf(buf, sizeof(buf), "#TC2:%lu,%s,%s,%02X,%u,%lu,%lu,%s,%s,%s,%s,%s,%s*\n",
+                 seq, b_test ? "TEST" : b_ok ? "OK" : "NONE", "PA8", btn_mask, 255, 3300UL, (unsigned long)millis(),
+                 socket_map[0].rl_name, socket_map[0].rh_name,
+                 socket_map[1].rl_name, socket_map[1].rh_name,
+                 socket_map[2].rl_name, socket_map[2].rh_name);
 
 #if defined(USART1)
         SerialUART1.print(buf);
 #endif
-        Serial.print(buf);
     }
 }
