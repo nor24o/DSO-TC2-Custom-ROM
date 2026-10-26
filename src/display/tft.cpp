@@ -119,9 +119,9 @@ void tft_init(void) {
     write_data(0x55);
     delay(10);
 
-    // 0x60 = Landscape MV=1, MX=1, RGB color order, Normal Top->Bottom scan
+    // 0xA0 = Flipped Landscape (180 deg) MV=1, MY=1, MX=0, RGB color order
     write_cmd(0x36);
-    write_data(0x60);
+    write_data(0xA0);
     delay(10);
 
     write_cmd(0xB2);
