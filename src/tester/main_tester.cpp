@@ -1,10 +1,8 @@
 /**
  * @file main_tester.cpp
  * @brief FNIRSI DSO-TC2 Secondary MCU (STM32L083RZT6)
- * - Differential Keypad Pin Detector with baseline auto-calibration
- * - Reads physical UP, DOWN, LEFT, RIGHT, OK buttons
- * - Measures exact VCC via calibrated VREFINT
- * - Inter-MCU Telemetry at 38400 baud over USART1 (PA9 TX) & USART2 (PA2 TX)
+ * - Full-spectrum pin change and ADC sniffer
+ * - Reports any pin delta over USART1 (PA9) & USART2 (PA2) at 38400 baud
  */
 
 #include <Arduino.h>
@@ -13,29 +11,21 @@
 HardwareSerial SerialUART1(USART1);
 #endif
 
-// All candidate pins to monitor for front-panel buttons
+// Monitored GPIOs on STM32L083
 static const uint32_t MONITORED_PINS[] = {
-    // Port A
     PA0, PA1, PA4, PA5, PA6, PA7, PA8, PA11, PA12, PA15,
-    // Port B
     PB0, PB1, PB2, PB3, PB4, PB5, PB7, PB8, PB9, PB12, PB13, PB14, PB15,
-    // Port C
     PC0, PC1, PC2, PC3, PC4, PC5, PC6, PC7, PC8, PC9, PC10, PC11, PC12, PC13,
-    // Port D
     PD2
 };
-static const size_t NUM_MONITORED = sizeof(MONITORED_PINS) / sizeof(MONITORED_PINS[0]);
+static const size_t NUM_PINS = sizeof(MONITORED_PINS) / sizeof(MONITORED_PINS[0]);
 
-// Baseline idle state (1 = idling HIGH with pull-up, 0 = tied to GND on PCB)
-static uint8_t idle_state[NUM_MONITORED];
+static uint8_t last_pin_state[NUM_PINS];
+static char last_event[32] = "L083_IDLE";
+static uint32_t event_counter = 0;
 
-// VREFINT calibration value
 #define VREFINT_CAL_ADDR ((uint16_t*)((uint32_t)0x1FF80078))
 #define VREFINT_CAL_VREF 3000
-
-static uint32_t packet_seq = 0;
-static char curr_pressed_pin[16] = "NONE";
-static char last_pressed_pin[16] = "NONE";
 
 static uint32_t read_vcc_mv() {
     analogReadResolution(12);
@@ -47,7 +37,6 @@ static uint32_t read_vcc_mv() {
 }
 
 void setup() {
-    // 1. Initialize candidate hardware UARTs at 38400 baud
     Serial.setRx(PA3);
     Serial.setTx(PA2);
     Serial.begin(38400);
@@ -58,65 +47,52 @@ void setup() {
     SerialUART1.begin(38400);
 #endif
 
-    // 2. Configure all monitored pins as INPUT_PULLUP
-    for (size_t i = 0; i < NUM_MONITORED; i++) {
+    // Set all monitored pins as INPUT_PULLUP
+    for (size_t i = 0; i < NUM_PINS; i++) {
         pinMode(MONITORED_PINS[i], INPUT_PULLUP);
     }
-
-    // 3. Auto-calibrate baseline idle state after pull-ups settle
     delay(50);
-    for (size_t i = 0; i < NUM_MONITORED; i++) {
-        idle_state[i] = digitalRead(MONITORED_PINS[i]);
+
+    // Record initial states
+    for (size_t i = 0; i < NUM_PINS; i++) {
+        last_pin_state[i] = digitalRead(MONITORED_PINS[i]);
     }
 }
 
 void loop() {
-    // Differential Scan: Only detect pins that were IDLE HIGH and are now PULLED LOW
-    uint32_t active_count = 0;
-    curr_pressed_pin[0] = '\0';
+    // Check for any pin transition (HIGH -> LOW or LOW -> HIGH)
+    for (size_t i = 0; i < NUM_PINS; i++) {
+        uint8_t cur = digitalRead(MONITORED_PINS[i]);
+        if (cur != last_pin_state[i]) {
+            last_pin_state[i] = cur;
+            event_counter++;
 
-    for (size_t i = 0; i < NUM_MONITORED; i++) {
-        // If pin normally idles HIGH, and is currently LOW -> BUTTON PRESSED!
-        if (idle_state[i] == HIGH && digitalRead(MONITORED_PINS[i]) == LOW) {
             uint32_t p = MONITORED_PINS[i];
-            active_count++;
             int port = (p >> 4) & 0xF;
             int pin_num = p & 0xF;
             char port_char = (port == 0) ? 'A' : (port == 1) ? 'B' : (port == 2) ? 'C' : 'D';
-            
-            char pin_str[16];
-            snprintf(pin_str, sizeof(pin_str), "P%c%d", port_char, pin_num);
 
-            if (curr_pressed_pin[0] == '\0') {
-                strncpy(curr_pressed_pin, pin_str, sizeof(curr_pressed_pin) - 1);
-            }
-            strncpy(last_pressed_pin, pin_str, sizeof(last_pressed_pin) - 1);
+            snprintf(last_event, sizeof(last_event), "P%c%d_%s", port_char, pin_num, cur ? "HIGH" : "LOW");
         }
     }
 
-    if (active_count == 0) {
-        strncpy(curr_pressed_pin, "NONE", sizeof(curr_pressed_pin) - 1);
-    }
+    static uint32_t last_tx = 0;
+    if (millis() - last_tx >= 40) { // 25 Hz
+        last_tx = millis();
 
-    packet_seq++;
-    uint16_t reg_a = (uint16_t)GPIOA->IDR;
-    uint16_t reg_b = (uint16_t)GPIOB->IDR;
-    uint16_t reg_c = (uint16_t)GPIOC->IDR;
-    uint32_t vcc_mv = read_vcc_mv();
+        uint16_t ra = (uint16_t)GPIOA->IDR;
+        uint16_t rb = (uint16_t)GPIOB->IDR;
+        uint16_t rc = (uint16_t)GPIOC->IDR;
+        uint32_t vcc = read_vcc_mv();
 
-    // Format: #TC2:<seq>,<curr_pressed>,<last_pressed>,<reg_a>,<reg_b>,<reg_c>,<vcc_mv>,<uptime_ms>*\n
-    char buf[128];
-    snprintf(buf, sizeof(buf), "#TC2:%lu,%s,%s,%04X,%04X,%04X,%lu,%lu*\n",
-             packet_seq,
-             curr_pressed_pin,
-             last_pressed_pin,
-             reg_a, reg_b, reg_c,
-             vcc_mv, millis());
+        // Format: #TC2:<event_counter>,<last_event>,<ra>,<rb>,<rc>,<vcc>,<uptime>*\n
+        char buf[128];
+        snprintf(buf, sizeof(buf), "#TC2:%lu,%s,%04X,%04X,%04X,%lu,%lu*\n",
+                 event_counter, last_event, ra, rb, rc, vcc, millis());
 
 #if defined(USART1)
-    SerialUART1.print(buf);
+        SerialUART1.print(buf);
 #endif
-    Serial.print(buf);
-
-    delay(40); // 25 Hz telemetry rate
+        Serial.print(buf);
+    }
 }
