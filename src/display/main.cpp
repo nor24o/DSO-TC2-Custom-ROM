@@ -1,17 +1,19 @@
 /**
  * @file main.cpp
- * @brief FNIRSI DSO-TC2 Master Display & Complete Keypad Console (186 FPS)
+ * @brief FNIRSI DSO-TC2 Master Display & Hardware Console (186 FPS)
  * 
- * Clean 320x240 UI layout with ZERO text overflow:
- * - Dual-format universal UART parser (backward & forward compatible)
- * - All 6 buttons hardware-verified:
- *   * UP    = PC8  (Pin 39)
- *   * DOWN  = PC9  (Pin 40)
- *   * LEFT  = PB14 (Pin 35)
- *   * RIGHT = PA8  (Pin 41)
- *   * OK    = PB9  (Pin 62)
- *   * MENU  = PB15 (Pin 36)
- * - Live raw packet monitor & connection diagnostics
+ * Clean 320x240 UI layout with exact 6-button physical panel mapping:
+ * - POWER      = PB13 (Pin 34)
+ * - OK / ENTER = PB14 (Pin 35, Left Navigation <)
+ * - MENU / AUTO= PB15 (Pin 36)
+ * - UP         = PC8  (Pin 39, ^)
+ * - DOWN       = PC9  (Pin 40, v)
+ * - TEST / HOLD= PA8  (Pin 41, Right Navigation >)
+ * - BUZZER     = PC6  (Pin 37, Audio Generator)
+ * - BACKLIGHT  = PC7  (Pin 38, LCD Backlight PWM)
+ * - RELAY      = PB6  (Pin 58, Oscilloscope Range Switch)
+ * - PWR HOLD   = PB7  (Pin 59, Battery Latch)
+ * - IR RECEIVER= PB9  (Pin 62, 38 kHz Demodulator)
  */
 
 #include <Arduino.h>
@@ -48,7 +50,7 @@ static void parse_packet(const char* pkt) {
     strncpy(last_raw_pkt, pkt, sizeof(last_raw_pkt) - 1);
     last_raw_pkt[sizeof(last_raw_pkt) - 1] = '\0';
 
-    // 1. Try new format: #TC2:<seq>,<btn_str>,<pin_str>,<mask_hex>,<bl_val>,<vcc>,<uptime>*
+    // Format: #TC2:<seq>,<btn_str>,<pin_str>,<mask_hex>,<bl_val>,<vcc>,<uptime>*
     uint32_t seq, vcc, uptime;
     char btn_str[24], pin_str[16];
     unsigned int mask_val, bl_val;
@@ -62,38 +64,6 @@ static void parse_packet(const char* pkt) {
         strncpy(l083_data.active_pin, pin_str, sizeof(l083_data.active_pin) - 1);
         l083_data.btn_mask = (uint8_t)mask_val;
         l083_data.backlight = (uint8_t)bl_val;
-        l083_data.vcc_mv = vcc;
-        l083_data.uptime_ms = uptime;
-        l083_data.total_packets++;
-        l083_data.connected = true;
-        last_rx_time = millis();
-        return;
-    }
-
-    // 2. Fallback to old format: #TC2:<seq>,<btn_str>,<pin_str>,<ra>,<rb>,<rc>,<vcc>,<uptime>
-    unsigned int ra, rb, rc;
-    n = sscanf(pkt + 5, "%lu,%23[^,],%15[^,],%x,%x,%x,%lu,%lu",
-               &seq, btn_str, pin_str, &ra, &rb, &rc, &vcc, &uptime);
-    if (n >= 8) {
-        l083_data.seq = seq;
-        strncpy(l083_data.active_btn, btn_str, sizeof(l083_data.active_btn) - 1);
-        strncpy(l083_data.active_pin, pin_str, sizeof(l083_data.active_pin) - 1);
-        
-        bool b_up    = !(rc & (1U << 8));
-        bool b_down  = !(rc & (1U << 9));
-        bool b_left  = !(rb & (1U << 14));
-        bool b_right = !(ra & (1U << 8));
-        bool b_ok    = !(rb & (1U << 9)) || (strcmp(btn_str, "OK") == 0);
-        bool b_menu  = !(rb & (1U << 15));
-
-        l083_data.btn_mask = (b_up    ? 0x01 : 0) |
-                             (b_down  ? 0x02 : 0) |
-                             (b_left  ? 0x04 : 0) |
-                             (b_right ? 0x08 : 0) |
-                             (b_ok    ? 0x10 : 0) |
-                             (b_menu  ? 0x20 : 0);
-
-        l083_data.backlight = 255;
         l083_data.vcc_mv = vcc;
         l083_data.uptime_ms = uptime;
         l083_data.total_packets++;
@@ -175,75 +145,70 @@ void loop() {
         last_ui = millis();
 
         uint8_t m = l083_data.btn_mask;
+        // bit 0: UP, bit 1: DOWN, bit 2: OK, bit 3: TEST, bit 4: MENU, bit 5: POWER, bit 6: RELAY, bit 7: IR_ACTIVE
         bool b_up    = (m & 0x01) != 0;
         bool b_down  = (m & 0x02) != 0;
-        bool b_left  = (m & 0x04) != 0;
-        bool b_right = (m & 0x08) != 0;
-        bool b_ok    = (m & 0x10) != 0;
-        bool b_menu  = (m & 0x20) != 0;
+        bool b_ok    = (m & 0x04) != 0;
+        bool b_test  = (m & 0x08) != 0;
+        bool b_menu  = (m & 0x10) != 0;
+        bool b_pwr   = (m & 0x20) != 0;
         bool b_relay = (m & 0x40) != 0;
         bool b_ir    = (m & 0x80) != 0;
+        bool b_buzz  = ((m & 0x3F) != 0) || b_ir; // Buzzer active on any button/IR
 
-        // --- Render Keypad & Peripherals Matrix ---
-        // Top row: [ RELAY:PB6 ]  [ UP:PC8 ]  [ IR RX:PB9 ]
-        // Mid row: [ LEFT:PB14 ]  [ OK:HUNT]  [ RIGHT:PA8 ]  [ M:PB15 ]
-        // Bot row:                [ DOWN:PC9 ]
+        // --- Render Keypad & Peripherals Matrix (3x3 Grid) ---
+        // Row 0: [ POWER: PB13 ]   [ UP ^: PC8 ]    [ MENU: PB15 ]
+        // Row 1: [ OK / <: PB14 ]  [ RELAY: PB6 ]   [ TEST / >: PA8 ]
+        // Row 2: [ BUZZER: PC6 ]   [ DOWN v: PC9 ]  [ IR RX: PB9 ]
 
-        // RELAY (top left)
-        draw_btn(20, 32, 76, 28, "RELAY", b_relay ? "ON:PB6" : "OFF:PB6", b_relay);
+        // Top Row (Y = 32)
+        draw_btn(12, 32, 92, 28, "POWER", "PB13", b_pwr);
+        draw_btn(114, 32, 92, 28, "UP ^", "PC8", b_up);
+        draw_btn(216, 32, 92, 28, "MENU", "PB15", b_menu);
 
-        // UP (top center)
-        draw_btn(110, 32, 76, 28, "UP", "PC8", b_up);
+        // Middle Row (Y = 68)
+        draw_btn(12, 68, 92, 28, "OK / <", "PB14", b_ok);
+        draw_btn(114, 68, 92, 28, "RELAY", b_relay ? "ON:PB6" : "OFF:PB6", b_relay);
+        draw_btn(216, 68, 92, 28, "TEST / >", "PA8", b_test);
 
-        // IR RX (top right)
-        draw_btn(200, 32, 76, 28, "IR RX", b_ir ? "SIGNAL!" : "PB9", b_ir);
-
-        // LEFT
-        draw_btn(20, 68, 76, 28, "LEFT", "PB14", b_left);
-
-        // OK (center)
-        draw_btn(110, 68, 76, 28, "OK", b_ok ? l083_data.active_pin : "HUNT...", b_ok);
-
-        // RIGHT
-        draw_btn(200, 68, 76, 28, "RIGHT", "PA8", b_right);
-
-        // MENU (far right)
-        draw_btn(280, 68, 34, 28, "M", "PB15", b_menu);
-
-        // DOWN (bottom center)
-        draw_btn(110, 104, 76, 28, "DOWN", "PC9", b_down);
+        // Bottom Row (Y = 104)
+        draw_btn(12, 104, 92, 28, "BUZZER", b_buzz ? "ACTIVE" : "PC6", b_buzz);
+        draw_btn(114, 104, 92, 28, "DOWN v", "PC9", b_down);
+        draw_btn(216, 104, 92, 28, "IR RX", b_ir ? "SIGNAL!" : "PB9", b_ir);
 
         // --- Render System Health & Diagnostics ---
-        char buf[64];
+        char buf[96];
 
         // Line 1: Active Event State
-        if (b_ir) {
-            tft_print(10, 146, ">> INFRARED DETECTED: Demodulated pulse on PB9! <<  ", COLOR_CYAN, COLOR_BLACK, 1);
+        if (b_pwr) {
+            tft_print(10, 146, ">> POWER BUTTON PRESSED: PB13 (Hold 1.5s to shut down) << ", COLOR_RED, COLOR_BLACK, 1);
+        } else if (b_ir) {
+            tft_print(10, 146, ">> INFRARED DETECTED: Demodulated pulse on PB9! <<        ", COLOR_CYAN, COLOR_BLACK, 1);
         } else if ((m & 0x3F) != 0) {
-            snprintf(buf, sizeof(buf), ">> BUTTON ACTIVE: %-6s (PIN: %-5s, MASK: 0x%02X) <<", 
+            snprintf(buf, sizeof(buf), ">> BUTTON ACTIVE: %-6s (PIN: %-4s, MASK: 0x%02X) <<        ", 
                      l083_data.active_btn, l083_data.active_pin, m);
             tft_print(10, 146, buf, COLOR_GREEN, COLOR_BLACK, 1);
         } else {
-            tft_print(10, 146, "IDLE: Aim IR remote at PB9 | Hold M+RT to toggle PB6 ", COLOR_LIGHTGREY, COLOR_BLACK, 1);
+            tft_print(10, 146, "IDLE: 6 Buttons Mapped | Hold M+TEST: Relay | Hold PWR: Off", COLOR_LIGHTGREY, COLOR_BLACK, 1);
         }
 
         // Line 2: Pin Mapping & Relay Status
-        snprintf(buf, sizeof(buf), "UP:PC8 DN:PC9 LF:PB14 RT:PA8 MN:PB15 | RELAY:%s ", b_relay ? "ON " : "OFF");
+        snprintf(buf, sizeof(buf), "PWR:PB13 UP:PC8 DN:PC9 OK:PB14 TEST:PA8 MN:PB15             ");
         tft_print(10, 164, buf, COLOR_YELLOW, COLOR_BLACK, 1);
 
         // Line 3: Power, Backlight, Buzzer & IR Controls
         uint8_t bl_pct = (uint16_t)l083_data.backlight * 100 / 255;
-        snprintf(buf, sizeof(buf), "BL: PC7 (%2u%%) | PWR: PB7 | BUZZ: PC6 | IR: PB9  ", bl_pct);
+        snprintf(buf, sizeof(buf), "BL: PC7 (%2u%%) | PWR: PB7 | BUZZ: PC6 | RELAY: PB6 (%s)  ", bl_pct, b_relay ? "ON " : "OFF");
         tft_print(10, 182, buf, COLOR_CYAN, COLOR_BLACK, 1);
 
         // Line 4: Voltage & Packets
-        snprintf(buf, sizeof(buf), "VCC: %0.2fV | LINK: %-5lu pkts (%2u Hz) | UPTIME: %lus",
+        snprintf(buf, sizeof(buf), "VCC: %0.2fV | LINK: %-5lu pkts (%2u Hz) | UPTIME: %lus     ",
                  l083_data.vcc_mv / 1000.0f, l083_data.total_packets, 25, l083_data.uptime_ms / 1000);
         tft_print(10, 202, buf, COLOR_WHITE, COLOR_BLACK, 1);
 
-        // Line 5: Connection Status or Raw packet
+        // Line 5: Connection Status
         if (l083_data.connected) {
-            tft_print(10, 220, "Secondary MCU: ONLINE (STM32L083RZ via UART)        ", 0x07E0, COLOR_BLACK, 1);
+            tft_print(10, 220, "Secondary MCU: ONLINE (STM32L083RZ via UART)              ", 0x07E0, COLOR_BLACK, 1);
         } else {
             snprintf(buf, sizeof(buf), "OFFLINE | RX: %-36s", last_raw_pkt);
             tft_print(10, 220, buf, COLOR_RED, COLOR_BLACK, 1);
