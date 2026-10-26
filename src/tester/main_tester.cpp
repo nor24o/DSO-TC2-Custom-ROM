@@ -32,8 +32,13 @@ HardwareSerial SerialUART1(USART1);
 
 #define PIN_PWR_HOLD   PB7
 #define PIN_BACKLIGHT  PC7
+#define PIN_BUZZER     PC12
 
 static uint8_t backlight_level = 255;
+
+static void beep(uint16_t freq_hz = 2700, uint16_t dur_ms = 30) {
+    tone(PIN_BUZZER, freq_hz, dur_ms);
+}
 
 #define VREFINT_CAL_ADDR ((uint16_t*)((uint32_t)0x1FF80078))
 #define VREFINT_CAL_VREF 3000
@@ -60,6 +65,15 @@ void setup() {
     pinMode(PIN_BACKLIGHT, OUTPUT);
     digitalWrite(PIN_BACKLIGHT, HIGH);
 
+    // 3. Initialize Buzzer on PC12
+    pinMode(PIN_BUZZER, OUTPUT);
+    digitalWrite(PIN_BUZZER, LOW);
+
+    // Startup Chime
+    beep(2000, 40);
+    delay(60);
+    beep(3200, 60);
+
     Serial.setRx(PA3);
     Serial.setTx(PA2);
     Serial.begin(38400);
@@ -70,7 +84,7 @@ void setup() {
     SerialUART1.begin(38400);
 #endif
 
-    // 3. Configure all 6 front buttons with internal pullups
+    // 4. Configure all 6 front buttons with internal pullups
     pinMode(PIN_BTN_UP,    INPUT_PULLUP);
     pinMode(PIN_BTN_DOWN,  INPUT_PULLUP);
     pinMode(PIN_BTN_LEFT,  INPUT_PULLUP);
@@ -119,9 +133,12 @@ void loop() {
     else if (b_right) { active_btn = "RIGHT"; active_pin = "PA8";  }
     else if (b_menu)  { active_btn = "MENU";  active_pin = "PB15"; }
 
-    // Print to RTT on button transitions
+    // Print to RTT on button transitions & play key click sound
     static uint8_t prev_mask = 0;
     if (btn_mask != prev_mask) {
+        if (btn_mask > prev_mask) {
+            beep(2800, 18); // Crisp key click sound
+        }
         prev_mask = btn_mask;
         if (btn_mask != 0) {
             rtt.printf(">> [KEY EVENT] ACTIVE: %s (PIN: %s, MASK: 0x%02X)\n",
@@ -138,11 +155,13 @@ void loop() {
             backlight_level = (backlight_level > 230) ? 255 : (backlight_level + 25);
             analogWrite(PIN_BACKLIGHT, backlight_level);
             last_bl_change = millis();
+            beep(3600, 15);
             rtt.printf(">> Backlight UP: %u/255\n", backlight_level);
         } else if (b_down && backlight_level > 30) {
             backlight_level = (backlight_level < 55) ? 30 : (backlight_level - 25);
             analogWrite(PIN_BACKLIGHT, backlight_level);
             last_bl_change = millis();
+            beep(1800, 15);
             rtt.printf(">> Backlight DOWN: %u/255\n", backlight_level);
         }
     }
