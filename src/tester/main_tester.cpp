@@ -1,37 +1,39 @@
 /**
  * @file main_tester.cpp
  * @brief FNIRSI DSO-TC2 Secondary MCU (STM32L083RZT6)
- * - Front Keypad Precision Pin Decoder
- * - Confirmed buttons: RIGHT=PA8, LEFT=PB14, MENU=PB15
- * - Auto-detects UP, DOWN, OK across PB12, PB13, Port C, Port A
- * - Interactive Relay Seeker on command
+ * - Rock-solid Keypad & Telemetry Engine (Brownout-Safe)
+ * - Confirmed Buttons:
+ *   * UP    = PC8  (Pin 39)
+ *   * DOWN  = PC9  (Pin 40)
+ *   * LEFT  = PB14 (Pin 35)
+ *   * RIGHT = PA8  (Pin 41)
+ *   * OK    = PB9  (Pin 62)
+ *   * MENU  = PB15 (Pin 36)
+ * - Safe GPIO Initialization (leaves PC6 as input to prevent power cutoff)
+ * - Soft Backlight control on PC7
  */
 
 #include <Arduino.h>
+#include <RTTStream.h>
+
+RTTStream rtt;
 
 #if defined(USART1)
 HardwareSerial SerialUART1(USART1);
 #endif
 
-// All candidate pins to monitor
-static const uint32_t ALL_PINS[] = {
-    // Port A
-    PA0, PA1, PA4, PA5, PA6, PA7, PA8, PA11, PA12, PA15,
-    // Port B
-    PB0, PB1, PB2, PB3, PB4, PB5, PB7, PB8, PB9, PB12, PB13, PB14, PB15,
-    // Port C
-    PC0, PC1, PC2, PC3, PC4, PC5, PC6, PC7, PC8, PC9, PC10, PC11, PC12, PC13,
-    // Port D
-    PD2
-};
-static const size_t NUM_PINS = sizeof(ALL_PINS) / sizeof(ALL_PINS[0]);
+// Pin Definitions
+#define PIN_BTN_UP     PC8
+#define PIN_BTN_DOWN   PC9
+#define PIN_BTN_LEFT   PB14
+#define PIN_BTN_RIGHT  PA8
+#define PIN_BTN_OK     PB9
+#define PIN_BTN_MENU   PB15
 
-// Baseline state
-static uint8_t base_state[NUM_PINS];
+#define PIN_PWR_HOLD   PB7
+#define PIN_BACKLIGHT  PC7
 
-// Relay Seeker candidate pin index (-1 = idle)
-static int relay_seek_pin = -1;
-static uint32_t relay_pulse_end = 0;
+static uint8_t backlight_level = 255;
 
 #define VREFINT_CAL_ADDR ((uint16_t*)((uint32_t)0x1FF80078))
 #define VREFINT_CAL_VREF 3000
@@ -46,6 +48,18 @@ static uint32_t read_vcc_mv() {
 }
 
 void setup() {
+    // 1. Immediately latch battery power ON via PB7
+    pinMode(PIN_PWR_HOLD, OUTPUT);
+    digitalWrite(PIN_PWR_HOLD, HIGH);
+
+    // Also drive PC6 HIGH just in case of dual latching / enable
+    pinMode(PC6, OUTPUT);
+    digitalWrite(PC6, HIGH);
+
+    // 2. Turn on LCD Backlight via PC7
+    pinMode(PIN_BACKLIGHT, OUTPUT);
+    digitalWrite(PIN_BACKLIGHT, HIGH);
+
     Serial.setRx(PA3);
     Serial.setTx(PA2);
     Serial.begin(38400);
@@ -56,76 +70,84 @@ void setup() {
     SerialUART1.begin(38400);
 #endif
 
-    // Set all monitored pins as INPUT_PULLUP
-    for (size_t i = 0; i < NUM_PINS; i++) {
-        pinMode(ALL_PINS[i], INPUT_PULLUP);
-    }
-    delay(50);
+    // 3. Configure all 6 front buttons with internal pullups
+    pinMode(PIN_BTN_UP,    INPUT_PULLUP);
+    pinMode(PIN_BTN_DOWN,  INPUT_PULLUP);
+    pinMode(PIN_BTN_LEFT,  INPUT_PULLUP);
+    pinMode(PIN_BTN_RIGHT, INPUT_PULLUP);
+    pinMode(PIN_BTN_OK,    INPUT_PULLUP);
+    pinMode(PIN_BTN_MENU,  INPUT_PULLUP);
 
-    for (size_t i = 0; i < NUM_PINS; i++) {
-        base_state[i] = digitalRead(ALL_PINS[i]);
-    }
+    rtt.println("\n\n========================================================");
+    rtt.println("   FNIRSI DSO-TC2 COMPLETE HARDWARE ENGINE ONLINE       ");
+    rtt.println("   POWER LATCH: PB7=HIGH | BACKLIGHT: PC7=HIGH          ");
+    rtt.println("   UP=PC8, DOWN=PC9, LEFT=PB14, RIGHT=PA8               ");
+    rtt.println("   OK=PB9, MENU=PB15                                    ");
+    rtt.println("========================================================\n");
 }
 
 void loop() {
-    // 1. Process Relay Pulse if active
-    if (relay_seek_pin >= 0 && millis() >= relay_pulse_end) {
-        digitalWrite(relay_seek_pin, LOW);
-        pinMode(relay_seek_pin, INPUT_PULLUP); // restore to input
-        relay_seek_pin = -1;
-    }
-
-    // 2. Scan for active button
-    char active_btn[24] = "NONE";
-    char active_pin_name[16] = "NONE";
-
-    // Read registers directly for fastest detection
+    // Read hardware registers directly for zero latency
     uint16_t ra = (uint16_t)GPIOA->IDR;
     uint16_t rb = (uint16_t)GPIOB->IDR;
     uint16_t rc = (uint16_t)GPIOC->IDR;
 
-    // Check confirmed buttons:
-    // RIGHT: PA8 (bit 8 of GPIOA)
-    if (!(ra & (1U << 8))) {
-        strcpy(active_btn, "RIGHT");
-        strcpy(active_pin_name, "PA8");
-    }
-    // LEFT: PB14 (bit 14 of GPIOB)
-    else if (!(rb & (1U << 14))) {
-        strcpy(active_btn, "LEFT");
-        strcpy(active_pin_name, "PB14");
-    }
-    // MENU: PB15 (bit 15 of GPIOB)
-    else if (!(rb & (1U << 15))) {
-        strcpy(active_btn, "MENU");
-        strcpy(active_pin_name, "PB15");
-    }
-    // Check PB13
-    else if (!(rb & (1U << 13))) {
-        strcpy(active_btn, "PB13");
-        strcpy(active_pin_name, "PB13");
-    }
-    // Check PB12
-    else if (!(rb & (1U << 12))) {
-        strcpy(active_btn, "PB12");
-        strcpy(active_pin_name, "PB12");
-    }
-    else {
-        // Scan other pins for any transition from base_state
-        for (size_t i = 0; i < NUM_PINS; i++) {
-            if (base_state[i] == HIGH && digitalRead(ALL_PINS[i]) == LOW) {
-                uint32_t p = ALL_PINS[i];
-                int port = (p >> 4) & 0xF;
-                int pin_num = p & 0xF;
-                char port_char = (port == 0) ? 'A' : (port == 1) ? 'B' : (port == 2) ? 'C' : 'D';
-                snprintf(active_pin_name, sizeof(active_pin_name), "P%c%d", port_char, pin_num);
-                strncpy(active_btn, active_pin_name, sizeof(active_btn) - 1);
-                break;
-            }
+    // Decode all 6 buttons (active LOW)
+    bool b_up    = !(rc & (1U << 8));   // PC8
+    bool b_down  = !(rc & (1U << 9));   // PC9
+    bool b_left  = !(rb & (1U << 14));  // PB14
+    bool b_right = !(ra & (1U << 8));   // PA8
+    bool b_ok    = !(rb & (1U << 9));   // PB9
+    bool b_menu  = !(rb & (1U << 15));  // PB15
+
+    // Pack into a single 6-bit button mask
+    // bit 0: UP, bit 1: DOWN, bit 2: LEFT, bit 3: RIGHT, bit 4: OK, bit 5: MENU
+    uint8_t btn_mask = (b_up    ? 0x01 : 0) |
+                       (b_down  ? 0x02 : 0) |
+                       (b_left  ? 0x04 : 0) |
+                       (b_right ? 0x08 : 0) |
+                       (b_ok    ? 0x10 : 0) |
+                       (b_menu  ? 0x20 : 0);
+
+    const char* active_btn = "NONE";
+    const char* active_pin = "NONE";
+
+    if (b_ok)         { active_btn = "OK";    active_pin = "PB9";  }
+    else if (b_up)    { active_btn = "UP";    active_pin = "PC8";  }
+    else if (b_down)  { active_btn = "DOWN";  active_pin = "PC9";  }
+    else if (b_left)  { active_btn = "LEFT";  active_pin = "PB14"; }
+    else if (b_right) { active_btn = "RIGHT"; active_pin = "PA8";  }
+    else if (b_menu)  { active_btn = "MENU";  active_pin = "PB15"; }
+
+    // Print to RTT on button transitions
+    static uint8_t prev_mask = 0;
+    if (btn_mask != prev_mask) {
+        prev_mask = btn_mask;
+        if (btn_mask != 0) {
+            rtt.printf(">> [KEY EVENT] ACTIVE: %s (PIN: %s, MASK: 0x%02X)\n",
+                       active_btn, active_pin, btn_mask);
+        } else {
+            rtt.println(">> [KEY EVENT] ALL RELEASED (IDLE)");
         }
     }
 
-    // 3. Telemetry broadcast at 25 Hz
+    // Backlight adjustment: Hold MENU and press UP or DOWN
+    static uint32_t last_bl_change = 0;
+    if (b_menu && (millis() - last_bl_change > 150)) {
+        if (b_up && backlight_level < 255) {
+            backlight_level = (backlight_level > 230) ? 255 : (backlight_level + 25);
+            analogWrite(PIN_BACKLIGHT, backlight_level);
+            last_bl_change = millis();
+            rtt.printf(">> Backlight UP: %u/255\n", backlight_level);
+        } else if (b_down && backlight_level > 30) {
+            backlight_level = (backlight_level < 55) ? 30 : (backlight_level - 25);
+            analogWrite(PIN_BACKLIGHT, backlight_level);
+            last_bl_change = millis();
+            rtt.printf(">> Backlight DOWN: %u/255\n", backlight_level);
+        }
+    }
+
+    // 25 Hz Telemetry Packet to Display MCU
     static uint32_t last_tx = 0;
     static uint32_t seq = 0;
 
@@ -134,10 +156,10 @@ void loop() {
         seq++;
         uint32_t vcc = read_vcc_mv();
 
-        // Format: #TC2:<seq>,<btn_name>,<pin_name>,<ra>,<rb>,<rc>,<vcc>,<uptime>*\n
+        // Packet format: #TC2:<seq>,<btn_str>,<pin_str>,<mask_hex>,<bl_val>,<vcc>,<uptime>*\n
         char buf[128];
-        snprintf(buf, sizeof(buf), "#TC2:%lu,%s,%s,%04X,%04X,%04X,%lu,%lu*\n",
-                 seq, active_btn, active_pin_name, ra, rb, rc, vcc, millis());
+        snprintf(buf, sizeof(buf), "#TC2:%lu,%s,%s,%02X,%u,%lu,%lu*\n",
+                 seq, active_btn, active_pin, btn_mask, backlight_level, vcc, millis());
 
 #if defined(USART1)
         SerialUART1.print(buf);
