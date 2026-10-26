@@ -223,7 +223,7 @@ void loop() {
 
         // Line 3: Power, Backlight & Buzzer Controls
         uint8_t bl_pct = (uint16_t)l083_data.backlight * 100 / 255;
-        snprintf(buf, sizeof(buf), "BL: PC7 (%2u%%) | PWR: PB7 | BUZZER: PC12 (ACTIVE)  ", bl_pct);
+        snprintf(buf, sizeof(buf), "BL: PC7 (%2u%%) | PWR: PB7 | BUZZER: PC6 (ACTIVE)   ", bl_pct);
         tft_print(10, 182, buf, COLOR_CYAN, COLOR_BLACK, 1);
 
         // Line 4: Voltage & Packets

@@ -32,7 +32,7 @@ HardwareSerial SerialUART1(USART1);
 
 #define PIN_PWR_HOLD   PB7
 #define PIN_BACKLIGHT  PC7
-#define PIN_BUZZER     PC12
+#define PIN_BUZZER     PC6
 
 static uint8_t backlight_level = 255;
 
@@ -57,15 +57,11 @@ void setup() {
     pinMode(PIN_PWR_HOLD, OUTPUT);
     digitalWrite(PIN_PWR_HOLD, HIGH);
 
-    // Also drive PC6 HIGH just in case of dual latching / enable
-    pinMode(PC6, OUTPUT);
-    digitalWrite(PC6, HIGH);
-
     // 2. Turn on LCD Backlight via PC7
     pinMode(PIN_BACKLIGHT, OUTPUT);
     digitalWrite(PIN_BACKLIGHT, HIGH);
 
-    // 3. Initialize Buzzer on PC12
+    // 3. Initialize Buzzer on PC6 (idle LOW)
     pinMode(PIN_BUZZER, OUTPUT);
     digitalWrite(PIN_BUZZER, LOW);
 
