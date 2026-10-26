@@ -38,8 +38,8 @@ def main():
         dots = 0
         while time.time() - start_time < 90:
             try:
-                # Attempt fast connection
-                j.connect('STM32L083RZ', speed=1000)
+                # Attempt fast connection at 500 kHz
+                j.connect('STM32L083RZ', speed=500)
                 print("\n[+] TARGET CONNECTED! Halting CPU...")
                 j.halt()
                 
@@ -49,7 +49,16 @@ def main():
                 
                 j.reset(ms=20, halt=False)
                 j.restart()
-                print("[+] SUCCESS! Target is now running with PC6=HIGH (Power Latch) and PC7=HIGH (Backlight)!")
+                print("[+] SUCCESS! Target is now running with PB7=HIGH (Power Latch), PC7=HIGH (Backlight), PB6 (Relay) and PB9 (IR)!")
+                
+                j.close()
+                
+                # Now flash display MCU
+                print("\n" + "=" * 60)
+                print("   FLASHING DISPLAY MCU (STM32F103C6 via DAPLink)")
+                print("=" * 60)
+                import subprocess
+                subprocess.run([sys.executable, os.path.join(PROJ_DIR, "tools", "flash.py"), "--target", "display"])
                 sys.exit(0)
             except pylink.errors.JLinkException:
                 time.sleep(0.05)

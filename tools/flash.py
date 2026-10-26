@@ -64,12 +64,12 @@ def flash_tester():
         sys.exit(1)
         
     script_path = os.path.join(PROJ_DIR, "tools", "temp_flash_l083.jlink")
-    script_content = f"""RSetType 1
+    script_content = f"""RSetType 0
 h
 loadbin {bin_path.replace(os.sep, '/')}, 0x08000000
 r
 g
-Exit
+q
 """
     with open(script_path, "w") as f:
         f.write(script_content)
@@ -78,13 +78,13 @@ Exit
         JLINK_EXE,
         "-device", "STM32L083RZ",
         "-if", "SWD",
-        "-speed", "4000",
+        "-speed", "1000",
         "-autoconnect", "1",
         "-NoGui", "1",
         "-CommanderScript", script_path
     ]
     print(f"[+] Executing J-Link flash to STM32L083RZ...")
-    res = subprocess.run(jlink_cmd)
+    res = subprocess.run(jlink_cmd, timeout=20)
     
     try:
         os.remove(script_path)

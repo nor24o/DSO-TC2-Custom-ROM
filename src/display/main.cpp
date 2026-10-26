@@ -181,26 +181,33 @@ void loop() {
         bool b_right = (m & 0x08) != 0;
         bool b_ok    = (m & 0x10) != 0;
         bool b_menu  = (m & 0x20) != 0;
+        bool b_relay = (m & 0x40) != 0;
+        bool b_ir    = (m & 0x80) != 0;
 
-        // --- Render Keypad Matrix ---
-        // Layout:
-        //               [ UP: PC8 ]
-        // [ LEFT:PB14 ]   [ OK: PB9 ]   [ RIGHT:PA8 ]   [ MENU:PB15 ]
-        //              [ DOWN: PC9 ]
+        // --- Render Keypad & Peripherals Matrix ---
+        // Top row: [ RELAY:PB6 ]  [ UP:PC8 ]  [ IR RX:PB9 ]
+        // Mid row: [ LEFT:PB14 ]  [ OK:HUNT]  [ RIGHT:PA8 ]  [ M:PB15 ]
+        // Bot row:                [ DOWN:PC9 ]
+
+        // RELAY (top left)
+        draw_btn(20, 32, 76, 28, "RELAY", b_relay ? "ON:PB6" : "OFF:PB6", b_relay);
 
         // UP (top center)
         draw_btn(110, 32, 76, 28, "UP", "PC8", b_up);
+
+        // IR RX (top right)
+        draw_btn(200, 32, 76, 28, "IR RX", b_ir ? "SIGNAL!" : "PB9", b_ir);
 
         // LEFT
         draw_btn(20, 68, 76, 28, "LEFT", "PB14", b_left);
 
         // OK (center)
-        draw_btn(110, 68, 76, 28, "OK", "PB9", b_ok);
+        draw_btn(110, 68, 76, 28, "OK", b_ok ? l083_data.active_pin : "HUNT...", b_ok);
 
         // RIGHT
         draw_btn(200, 68, 76, 28, "RIGHT", "PA8", b_right);
 
-        // MENU (right side)
+        // MENU (far right)
         draw_btn(280, 68, 34, 28, "M", "PB15", b_menu);
 
         // DOWN (bottom center)
@@ -209,21 +216,24 @@ void loop() {
         // --- Render System Health & Diagnostics ---
         char buf[64];
 
-        // Line 1: Active Button State
-        if (m != 0) {
+        // Line 1: Active Event State
+        if (b_ir) {
+            tft_print(10, 146, ">> INFRARED DETECTED: Demodulated pulse on PB9! <<  ", COLOR_CYAN, COLOR_BLACK, 1);
+        } else if ((m & 0x3F) != 0) {
             snprintf(buf, sizeof(buf), ">> BUTTON ACTIVE: %-6s (PIN: %-5s, MASK: 0x%02X) <<", 
                      l083_data.active_btn, l083_data.active_pin, m);
             tft_print(10, 146, buf, COLOR_GREEN, COLOR_BLACK, 1);
         } else {
-            tft_print(10, 146, "IDLE: All 6 front buttons 100%% mapped & ready!      ", COLOR_LIGHTGREY, COLOR_BLACK, 1);
+            tft_print(10, 146, "IDLE: Aim IR remote at PB9 | Hold M+RT to toggle PB6 ", COLOR_LIGHTGREY, COLOR_BLACK, 1);
         }
 
-        // Line 2: Pin Mapping Confirmation
-        tft_print(10, 164, "UP=PC8  DN=PC9  LF=PB14  RT=PA8  OK=PB9  MN=PB15     ", COLOR_YELLOW, COLOR_BLACK, 1);
+        // Line 2: Pin Mapping & Relay Status
+        snprintf(buf, sizeof(buf), "UP:PC8 DN:PC9 LF:PB14 RT:PA8 MN:PB15 | RELAY:%s ", b_relay ? "ON " : "OFF");
+        tft_print(10, 164, buf, COLOR_YELLOW, COLOR_BLACK, 1);
 
-        // Line 3: Power, Backlight & Buzzer Controls
+        // Line 3: Power, Backlight, Buzzer & IR Controls
         uint8_t bl_pct = (uint16_t)l083_data.backlight * 100 / 255;
-        snprintf(buf, sizeof(buf), "BL: PC7 (%2u%%) | PWR: PB7 | BUZZER: PC6 (ACTIVE)   ", bl_pct);
+        snprintf(buf, sizeof(buf), "BL: PC7 (%2u%%) | PWR: PB7 | BUZZ: PC6 | IR: PB9  ", bl_pct);
         tft_print(10, 182, buf, COLOR_CYAN, COLOR_BLACK, 1);
 
         // Line 4: Voltage & Packets
