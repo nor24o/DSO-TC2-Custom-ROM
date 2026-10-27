@@ -80,36 +80,39 @@ graph TD
 
 ## 2. Tester MCU: STM32L083RZT6 (LQFP-64) Pinout
 
-### 2.1 Complete Pinout Table
+### 2.1 Complete Hardware Pinout Table
 
 | LQFP-64 Pin # | Pin Name | Peripheral | Hardware Net / Target | Active Status | Description |
 | :---: | :---: | :---: | :---: | :---: | :--- |
-| **14** | `PA0` | `ADC_IN0` | MT3608 Zener Divider Tap| **ACTIVE** | High-voltage breakdown voltage sense (0-30V) |
-| **16** | `PA2` | `USART2_TX` | Redundant Telemetry Link | **ACTIVE** | Secondary broadcast at 115,200 baud (`RX=NC`) |
-| **17** | `PA3` | `ADC_IN3` | Socket Pin 1 Sense | **ACTIVE** | Direct analog voltage measurement tap |
-| **20** | `PA4` | `ADC_IN4` | Socket Pin 2 Sense | **ACTIVE** | Direct analog voltage measurement tap |
-| **21** | `PA5` | `ADC_IN5` | Socket Pin 3 Sense | **ACTIVE** | Direct analog voltage measurement tap |
-| **23** | `PA7` | `GPIO / RL1`| Socket Pin 1 $680\,\Omega$ | **ACTIVE** | Low-range probe resistor ($R_{L1}$) |
-| **26** | `PB0` | `GPIO / RH1`| Socket Pin 1 $470\,\text{k}\Omega$ | **ACTIVE** | High-range probe resistor ($R_{H1}$) |
-| **27** | `PB1` | `GPIO / RL2`| Socket Pin 2 $680\,\Omega$ | **ACTIVE** | Low-range probe resistor ($R_{L2}$) |
-| **28** | `PB2` | `GPIO / RH2`| Socket Pin 2 $470\,\text{k}\Omega$ | **ACTIVE** | High-range probe resistor ($R_{H2}$) |
-| **29** | `PB10`| `GPIO / RL3`| Socket Pin 3 $680\,\Omega$ | **ACTIVE** | Low-range probe resistor ($R_{L3}$) |
-| **30** | `PB11`| `GPIO / RH3`| Socket Pin 3 $470\,\text{k}\Omega$ | **ACTIVE** | High-range probe resistor ($R_{H3}$) |
-| **34** | `PB13`| `GPIO / EXTI`| Button: **POWER** | **ACTIVE** | Active LOW, internal pull-up. Long press = shutdown |
-| **35** | `PB14`| `GPIO / EXTI`| Button: **OK** / `<` | **ACTIVE** | Active LOW, navigation & confirmation |
-| **36** | `PB15`| `GPIO / EXTI`| Button: **MENU** / `AUTO` | **ACTIVE** | Active LOW, cycles screens & backlight modifier |
-| **37** | `PC6` | `GPIO / PWM`| Buzzer / Piezo Audio | **ACTIVE** | DC pulses + multi-tone feedback (1.2 kHz–4.2 kHz) |
-| **38** | `PC7` | `GPIO / PWM`| LCD Backlight LED | **ACTIVE** | Brightness dimming (30..255) / On-Off |
-| **39** | `PC8` | `GPIO / EXTI`| Button: **UP** / `^` | **ACTIVE** | Active LOW, value increment |
-| **40** | `PC9` | `GPIO / EXTI`| Button: **DOWN** / `v` | **ACTIVE** | Active LOW, value decrement |
-| **41** | `PA8` | `GPIO / EXTI`| Button: **TEST** / `HOLD` / `>`| **ACTIVE** | Active LOW, triggers component test run |
-| **42** | `PA9` | `USART1_TX`| Inter-MCU Primary TX | **ACTIVE** | Transmits telemetry packets to Display MCU @ 115,200 baud |
-| **43** | `PA10`| `USART1_RX`| Inter-MCU Primary RX | **ACTIVE** | Receives commands from Display MCU @ 115,200 baud |
-| **46** | `PA13`| `SWDIO` | SWD Debug Data | **ACTIVE** | Segger J-Link programming pin |
+| **14** | `PA0` | `ADC_IN0` | MT3608 Zener Divider Tap| **ACTIVE** | High-voltage breakdown voltage sense (0-30V DC via resistor divider) |
+| **16** | `PA2` | `ADC_IN2` | Li-Po Battery 2:1 Divider | **ACTIVE** | Li-Po battery voltage monitor (samples ~2.15V at 4.3V battery rail) |
+| **17** | `PA3` | `ADC_IN3` | ZIF Socket Pin 1 Sense | **ACTIVE** | Direct 12-bit analog voltage measurement tap for Socket 1 |
+| **20** | `PA4` | `ADC_IN4` | ZIF Socket Pin 2 Sense | **ACTIVE** | Direct 12-bit analog voltage measurement tap for Socket 2 |
+| **21** | `PA5` | `ADC_IN5` | ZIF Socket Pin 3 Sense | **ACTIVE** | Direct 12-bit analog voltage measurement tap for Socket 3 |
+| **22** | `PA6` | `ADC_IN6` | External SMA Connector | **ACTIVE** | External DC Voltmeter tap (0 - 16.0V DC via 127k / 27k divider) |
+| **23** | `PA7` | `GPIO / RL1`| Socket Pin 1 $680\,\Omega$ | **ACTIVE** | Low-range probe resistor ($R_{L1}$) for Karl-Heinz tester matrix |
+| **24** | `PC4` | `GPIO` | MT3608 Boost Enable | **ACTIVE** | Powers on the Aerosemi MT3608 28V step-up boost converter for Zener tests |
+| **26** | `PB0` | `GPIO / RH1`| Socket Pin 1 $470\,\text{k}\Omega$ | **ACTIVE** | High-range probe resistor ($R_{H1}$) for Karl-Heinz tester matrix |
+| **27** | `PB1` | `GPIO / RL2`| Socket Pin 2 $680\,\Omega$ | **ACTIVE** | Low-range probe resistor ($R_{L2}$) for Karl-Heinz tester matrix |
+| **28** | `PB2` | `GPIO / RH2`| Socket Pin 2 $470\,\text{k}\Omega$ | **ACTIVE** | High-range probe resistor ($R_{H2}$) for Karl-Heinz tester matrix |
+| **29** | `PB10`| `GPIO / RL3`| Socket Pin 3 $680\,\Omega$ | **ACTIVE** | Low-range probe resistor ($R_{L3}$) for Karl-Heinz tester matrix |
+| **30** | `PB11`| `GPIO / RH3`| Socket Pin 3 $470\,\text{k}\Omega$ | **ACTIVE** | High-range probe resistor ($R_{H3}$) for Karl-Heinz tester matrix |
+| **34** | `PB13`| `GPIO / EXTI`| Button: **POWER** | **ACTIVE** | Active LOW, internal pull-up. Hold >1.5s for soft power shutdown |
+| **35** | `PB14`| `GPIO / EXTI`| Button: **OK** / `<` | **ACTIVE** | Active LOW. Left navigation & SigGen waveform mode / duty cycle selector |
+| **36** | `PB15`| `GPIO / EXTI`| Button: **MENU** / `AUTO` | **ACTIVE** | Active LOW. Instrument screen cycling (Tester -> IR -> Zener -> SigGen) |
+| **37** | `PC6` | `GPIO / PWM`| Buzzer / Piezo Audio | **ACTIVE** | Acoustic continuity beeper, melodic test chimes, and tactile key clicks |
+| **38** | `PC7` | `GPIO / PWM`| LCD Backlight LED | **ACTIVE** | Backlight brightness control (Active HIGH / PWM dimming) |
+| **39** | `PC8` | `GPIO / EXTI`| Button: **UP** / `^` | **ACTIVE** | Active LOW. Value increment / SigGen frequency step up |
+| **40** | `PC9` | `GPIO / EXTI`| Button: **DOWN** / `v` | **ACTIVE** | Active LOW. Value decrement / SigGen frequency step down |
+| **41** | `PA8` | `GPIO / EXTI`| Button: **TEST** / `HOLD` / `>`| **ACTIVE** | Active LOW. Triggers component test / Zener sample / SigGen output toggle |
+| **42** | `PA9` | `USART1_TX`| Inter-MCU Primary TX | **ACTIVE** | Transmits telemetry packets (`#TC2:`) to Display MCU @ 38,400 baud |
+| **43** | `PA10`| `USART1_RX`| Inter-MCU Primary RX | **ACTIVE** | Receives commands from Display MCU @ 38,400 baud |
+| **46** | `PA13`| `SWDIO` | SWD Debug Data | **ACTIVE** | Segger J-Link programming line |
 | **49** | `PA14`| `SWCLK` | SWD Debug Clock | **ACTIVE** | Segger J-Link programming clock |
 | **58** | `PB6` | `GPIO` | Oscilloscope Range Relay| **ACTIVE** | Solid-state relay for 1X / 10X input attenuation |
-| **59** | `PB7` | `GPIO` | Power-Hold Soft Latch | **ACTIVE** | Driven HIGH on boot to maintain 3.3V power regulator |
-| **62** | `PB9` | `GPIO / EXTI`| 38 kHz IR Demodulator | **ACTIVE** | Captures NEC / Samsung / Sony pulse-distance codes |
+| **59** | `PB7` | `GPIO` | Power-Hold Soft Latch | **ACTIVE** | Driven HIGH on boot to maintain 3.3V DC-DC power regulator |
+| **61** | `PB8` | `GPIO / TIM6`| Signal Generator Output | **ACTIVE** | Programmable PWM, Square, Pulse, and Ramp generator (10 Hz – 100 kHz) |
+| **62** | `PB9` | `GPIO / EXTI`| 38 kHz IR Demodulator | **ACTIVE** | Captures NEC / Samsung / Sony infrared remote pulse-distance codes |
 
 ---
 
@@ -161,7 +164,7 @@ graph TD
 | **9** | `VDDA` | Analog Power | 3.3V Filtered Rail | Power | Clean Analog VDD |
 | **10** | `PA0` | `ADC12_IN0` | Scope MCX Analog Front-End | Input | High-speed ADC sampling input |
 | **11** | `PA1` | `ADC_IN1 / TIM2` | Signal Generator Output | Reserved | PWM / DAC Waveform Generator |
-| **12** | `PA2` | `ADC12_IN2` | Li-Po Battery Voltage Sense | **ACTIVE** | Direct register ADC sampling 2:1 divider (0-4.2V), drives live UI battery gauge & percentage |
+| **12** | `PA2` | `ADC12_IN2` | Unconnected / NC | NC | (Battery divider resides on Tester MCU PA2) |
 | **17** | `PA7` | `GPIO` | **LCD `D0` Parallel Tap** | Output | Synchronously mirrored with `PB0` for bus speed |
 | **18** | `PB0` | `GPIO` | **LCD `D0`** | Output | 16-Bit Parallel Data Bit 0 |
 | **19** | `PB1` | `GPIO` | **LCD `D1`** | Output | 16-Bit Parallel Data Bit 1 |
@@ -223,9 +226,9 @@ graph TD
 
 ---
 
-## 4. Keypad Pin Assignment & Matrix Map
+## 4. Keypad Pin Assignment & Multi-Function Navigation
 
-The front panel buttons connect to the **STM32L083RZ** with internal pull-ups enabled:
+The 6 front panel buttons connect directly to the **Tester MCU (`STM32L083RZ`)** with internal pull-ups enabled:
 
 ```
                   +-----------------------------------+
@@ -238,13 +241,80 @@ The front panel buttons connect to the **STM32L083RZ** with internal pull-ups en
                   |               v                   |
                   |         [ DOWN: PC9 ]             |
                   |                                   |
-                  |    [MENU: PB15]   [POWER: PB13]   |
+                  |    [POWER: PB13]  [MENU: PB15]    |
                   +-----------------------------------+
 ```
 
-- **`PB13` (POWER)**: Short click = audio click; hold > 1.5 s triggers soft power-off sequence (`PB7 = LOW`).
-- **`PB15` (MENU / AUTO)**: Short click toggles active screen (`Component Tester` $\longleftrightarrow$ `IR Remote Decoder` $\longleftrightarrow$ `Console`).
-- **`PB15 + UP / DOWN`**: Controls LCD backlight brightness level (`PC7` PWM).
-- **`PB15 + TEST (PA8)`**: Toggles oscilloscope range relay (`PB6`).
-- **`PA8` (TEST / HOLD)**: Triggers single-shot component measurement in 1-2-3 socket.
-- **`PB9` (IR Receiver)**: Hardware interrupt capture on 38 kHz demodulated remote commands.
+### Button Functions per Instrument Screen
+
+| Button | Pin | Screen 0: Component Tester | Screen 1: IR Decoder | Screen 2: Zener (30V) | Screen 3: SigGen & Voltmeter |
+| :--- | :---: | :--- | :--- | :--- | :--- |
+| **`POWER`** | `PB13` | Click: Audio click<br>Hold >1.5s: Power Off | Same | Same | Same |
+| **`MENU`**  | `PB15` | Cycle to Screen 1 | Cycle to Screen 2 | Cycle to Screen 3 | Cycle to Screen 0 |
+| **`TEST`**  | `PA8`  | Run Component / 1-Wire Test | Clear Decoded History | Trigger Zener Sample | Toggle Output ON / OFF |
+| **`OK`**    | `PB14` | Navigation confirm | Clear buffer | Standby | Cycle Waveform Mode (Square/Pulse/Ramp) |
+| **`UP`**    | `PC8`  | Value increment | Scroll history | Value increment | Frequency step up (10Hz - 100kHz) |
+| **`DOWN`**  | `PC9`  | Value decrement | Scroll history | Value decrement | Frequency step down (10Hz - 100kHz)|
+
+### Global Hardware Modifier Shortcuts
+* **`MENU` + `UP` / `DOWN`**: Increments / decrements LCD backlight brightness (`PC7` PWM, range 30..255).
+* **`MENU` + `TEST`**: Manually toggles the solid-state oscilloscope input attenuator relay (`PB6`).
+
+---
+
+## 5. Front-Panel 14-Pin ZIF Socket & Terminal Mapping
+
+The front multi-connector ZIF socket is divided into the **Component Tester (1-2-3)** matrix and the **High-Voltage Zener Diode (K-A-A)** socket:
+
+```
+          +---------------------------------------------------+
+          |         14-PIN FRONT ZIF SOCKET PINOUT            |
+          +---------------------------------------------------+
+          |  Top Row:    [ 1 ] [ 2 ] [ 3 ] [ 1 ] [ 2 ] [ 3 ] [ 2 ]  |
+          |  Bottom Row: [ K ] [ A ] [ A ] [ 1 ] [ 2 ] [ 3 ] [ 3 ]  |
+          +---------------------------------------------------+
+```
+
+### Terminal Descriptions
+
+| Socket Terminal | Net Connection | MCU Pin | Connected Test Circuit | Target Components |
+| :---: | :---: | :---: | :--- | :--- |
+| **`1`** | Socket Pin 1 | `PA3` (Sense)<br>`PA7` ($R_{L1}$)<br>`PB0` ($R_{H1}$) | $680\,\Omega$ & $470\,\text{k}\Omega$ probes to $V_{CC}$/GND | Resistors, Capacitors, Inductors, BJTs, MOSFETs, Diodes, DS18B20 GND/VDD/DQ |
+| **`2`** | Socket Pin 2 | `PA4` (Sense)<br>`PB1` ($R_{L2}$)<br>`PB2` ($R_{H2}$) | $680\,\Omega$ & $470\,\text{k}\Omega$ probes to $V_{CC}$/GND | Same as above |
+| **`3`** | Socket Pin 3 | `PA5` (Sense)<br>`PB10` ($R_{L3}$)<br>`PB11` ($R_{H3}$) | $680\,\Omega$ & $470\,\text{k}\Omega$ probes to $V_{CC}$/GND | Same as above |
+| **`K`** | Zener Cathode | `PA0` (Sense) | MT3608 Boost rail tap through current limiter | High-voltage Zener cathode (bar end) |
+| **`A`** | Zener Anode | `GND` | Ground return rail | High-voltage Zener anode (triangle end) |
+
+*Note: In the 1-2-3 socket, all pins labeled `1` are internally bridged on the PCB, all pins labeled `2` are bridged, and all pins labeled `3` are bridged. You can plug components into any matching 1, 2, or 3 holes.*
+
+---
+
+## 6. Top-Edge Connector Pinout
+
+The top edge of the FNIRSI DSO-TC2 features three physical ports:
+
+```
+          +-------------------------------------------------------------+
+          |                      TOP EDGE OF CASING                     |
+          +-------------------------------------------------------------+
+          |   [ IN (SMA / MCX) ]       [ SIGGEN / PWM ]       [ USB-C ] |
+          +-------------------------------------------------------------+
+```
+
+1. **`IN` (SMA / MCX Connector)**:
+   - **Internal Connection**: Wired to **`PA6`** (`ADC_IN6`) on the Tester MCU through a precision $100\,\text{k}\Omega$ series and $27\,\text{k}\Omega$ shunt resistive divider ($\text{Ratio} = \frac{127}{27} \approx 4.704$).
+   - **Voltage Measurement Range**: **$0.0\text{V}$ to $16.0\text{V}$ DC** unipolar.
+   - **Scope Mode**: Routed through the solid-state input relay (`PB6`) to **`PA0`** on the Display MCU for high-speed oscilloscope sampling (up to 40V max with 10X attenuation).
+
+2. **`SIGGEN / PWM` Output**:
+   - **Internal Connection**: Driven directly by **`PB8`** on the Tester MCU (`STM32L083RZ`) via high-speed bare-metal `TIM6` interrupt.
+   - **Frequency Range**: **$10\text{ Hz}$ to $100\text{ kHz}$**.
+   - **Waveforms**: 50% Square Wave, 10%/25%/75%/90% Pulse, Triangle, Sine, and 80% Sawtooth / Ramp.
+   - **Output Level**: Fixed $3.3\text{V}$ CMOS logic level ($0.0\text{V}$ to $3.3\text{V}_{pp}$).
+
+3. **`USB-C` Port**:
+   - **Pin 1 / 12**: `GND`
+   - **Pin 4 / 9**: `VBUS` (5V charging input for onboard 1500 mAh Li-Po battery)
+   - **Pin A6 / B6**: `USB_DP` (wired to Display MCU `PA12`)
+   - **Pin A7 / B7**: `USB_DM` (wired to Display MCU `PA11`)
+

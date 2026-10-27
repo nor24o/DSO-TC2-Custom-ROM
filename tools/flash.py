@@ -98,17 +98,20 @@ q
 
 def main():
     parser = argparse.ArgumentParser(description="FNIRSI DSO-TC2 Dual-MCU Flashing Tool")
+    parser.add_argument("pos_target", nargs="?", choices=["display", "tester", "all"], default=None,
+                        help="Optional positional target: display, tester, or all")
     parser.add_argument("--target", choices=["display", "tester", "all"], default="all",
                         help="Select target MCU to flash (display, tester, or all)")
     args = parser.parse_args()
 
+    target = args.pos_target if args.pos_target else args.target
     os.chdir(PROJ_DIR)
     
-    if args.target == "display":
+    if target == "display":
         flash_display()
-    elif args.target == "tester":
+    elif target == "tester":
         flash_tester()
-    elif args.target == "all":
+    elif target == "all":
         flash_tester()
         flash_display()
 

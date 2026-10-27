@@ -20,81 +20,72 @@ An open-source, ultra-high-performance Custom ROM and reverse-engineering framew
 ## 🚀 Key Features
 
 - **Dual-MCU Distributed Architecture**:
-  - **Tester MCU (`STM32L083RZT6`, LQFP-64)**: Manages the 6-button physical panel, soft power latch (`PB7`), LCD backlight PWM (`PC7`), audio piezo engine (`PC6`), oscilloscope input relay (`PB6`), 38 kHz IR demodulator (`PB9`), and Karl-Heinz style 1-2-3 component tester matrix.
+  - **Tester MCU (`STM32L083RZT6`, LQFP-64)**: Manages the 6-button physical panel, soft power latch (`PB7`), LCD backlight PWM (`PC7`), audio piezo engine (`PC6`), oscilloscope input relay (`PB6`), 38 kHz IR demodulator (`PB9`), Karl-Heinz 1-2-3 component tester matrix, MT3608 28V boost converter (`PC4`), and bare-metal 100 kHz signal generator (`PB8`).
   - **Display MCU (`STM32F103C6`, LQFP-48)**: Drives the 2.4" 320×240 TFT LCD via direct 16-bit 8080 parallel bus at **186 Frames Per Second (FPS)**.
-  - **Synchronized High-Speed Telemetry Link**: Blazing-fast 115,200-baud UART protocol (`PA9`/`PA10` + redundant `PA2`) with **instant 0 ms event-driven key transmission** streaming real-time component measurements, remote codes, and Zener voltages with zero latency.
-- **Graphical Component Tester (Screen 1)**:
+  - **Synchronized Telemetry Link**: Reliable 38,400-baud UART protocol (`PA9`/`PA10`) through the onboard `RS0102` bi-directional level translator with **instant 0 ms event-driven key transmission** streaming real-time measurements, remote codes, battery voltage, and Zener values with zero latency.
+- **Graphical Component Tester (Screen 0)**:
   - **Full Multi-Junction Analysis**: Automatic detection and pinout identification for BJTs (**NPN** / **PNP**), MOSFETs (**N-Channel** / **P-Channel** with body diode verification), and diodes with exact forward voltage $V_f$.
   - **True Capacitor vs. Resistor Discrimination**: Multi-sample decay filtering prevents capacitive charge transients from being falsely identified as 1.6 M$\Omega$ resistors. Accurately measures from pF up to thousands of µF.
   - **Real-Time Schematic Symbols**: Dynamic electronic schematic glyphs (BJT, MOSFET, Diode, Resistor, Capacitor) with active pin badges ($B, C, E, G, D, S, A, K$) and visual 3-pin ZIF socket highlights.
-- **Live Battery Fuel Gauge & Monitor**:
-  - Monitored directly via 12-bit hardware register ADC on `PA2` (Display MCU) through the onboard 2:1 precision resistor divider.
-  - Features a dynamic color-coded multi-bar battery icon (Green $>50\%$, Yellow $20..50\%$, Red $<20\%$) and live percentage readout ($0..100\%$) across the header of all 4 screens.
-- **Dallas 1-Wire & DHT Digital Sensor Auto-Detection (Screen 1)**:
-  - **Dallas 1-Wire**: Auto-detects **DS18B20**, **DS18S20**, and **DS1822** digital temperature sensors in either normal (`1:GND 2:DQ 3:VDD`) or inverted (`3:GND 2:DQ 1:VDD`) orientation.
+- **Bare-Metal Dallas 1-Wire & DHT Digital Sensor Engine (Screen 0)**:
+  - **Dallas 1-Wire**: Bare-metal `GPIOA` IOPORT bit-banging with microsecond precision auto-detects **DS18B20**, **DS18S20**, and **DS1822** digital temperature sensors in either normal (`1:GND 2:DQ 3:VDD`) or inverted (`3:GND 2:DQ 1:VDD`) orientation.
   - Extracts full 64-bit factory laser ROM serial numbers and provides real-time digital temperature readouts in both Celsius (°C) and Fahrenheit (°F).
   - **Single-Bus Humidity**: Auto-detects **DHT11** / **DHT22** digital temperature and relative humidity (%RH) sensors.
   - Displays dedicated TO-92 and sensor casing schematic glyphs with mercury thermometer graphics and active pin badges.
+- **Live Battery Fuel Gauge & Real-Time Voltage Monitor**:
+  - Monitored directly via 12-bit hardware register ADC on **`PA2` of the Tester MCU** through the onboard 2:1 precision resistor divider.
+  - Streams live battery voltage to the Display MCU with dynamic color-coded multi-bar battery icon (Green $>50\%$, Yellow $20..50\%$, Red $<20\%$) and live percentage readout ($0..100\%$) across the header of all 4 screens.
+- **Dedicated 38 kHz IR Remote Protocol Decoder (Screen 1)**:
+  - Hardware EXTI timer engine decoding NEC, Samsung, and Sony pulse-distance encoded protocols on `PB9`.
+  - Clean non-overlapping display dashboard: Size-2 Command Hex/Dec, 16-bit Address, 32-bit Raw code, dynamic 32-bit bitstream visualizer, and live 3-key history log.
+- **Dedicated High-Voltage Zener Diode Tester (Screen 2)**:
+  - Measures reverse breakdown voltage ($V_z$) up to **30V** on the front `K` (Cathode) and `A` (Anode) terminals.
+  - Utilizes the onboard **Aerosemi MT3608 2A Step-Up Boost Converter** (~28V rail) with automatic current-limiting protection.
+  - Dedicated electronic Zener schematic graphic with iconic bent cathode wings and dynamic voltage classification (`Vz Breakdown`, `Open Rail >28V`, `Forward Diode Vf`, `Short Circuit`).
+- **Programmable Signal Generator & External SMA Voltmeter (Screen 3)**:
+  - **Signal Generator (`PB8`)**: High-speed bare-metal `TIM6` interrupt generator with relocated RAM vector table (`SCB->VTOR`), operating from **10 Hz up to 100 kHz** with zero CPU lockup. Supports 50% Square Wave, 10%/25%/75%/90% Pulse, Triangle, Sine, and 80% Sawtooth / Ramp.
+  - **External SMA Voltmeter (`PA6`)**: Real-time DC voltage measurement from **$0.0\text{V}$ to $16.0\text{V}$ DC** with visual analog bargraph and $0.01\text{V}$ precision.
 - **Acoustic Continuity Beeper & Multi-Tone Audio Engine**:
   - **Continuity Buzzer**: Low socket resistance ($< 30\,\Omega$) fires an instant loud continuity tone on `PC6` with radiating sound wave schematic glyphs `(( BEEP! ))`.
   - **Melodic Completion Chime**: Sweet 2-tone chime upon completing any component test.
   - **Tactile Key Clicks**: Instant acoustic feedback on every physical button press.
-- **Auto Power-Off (Battery Saver)**:
-  - Conserves Li-Po battery life with a graceful 5-minute inactivity shutdown sequence releasing soft-latch `PB7`.
-- **Dedicated 38 kHz IR Remote Protocol Decoder (Screen 2)**:
-  - Hardware EXTI timer engine decoding NEC, Samsung, and Sony pulse-distance encoded protocols.
-  - Clean non-overlapping display dashboard: Size-2 Command Hex/Dec, 16-bit Address, 32-bit Raw code, dynamic 32-bit bitstream visualizer, and live 3-key history log.
-- **Dedicated High-Voltage Zener Diode Tester (Screen 3)**:
-  - Measures reverse breakdown voltage ($V_z$) up to **30V** on the front `K` (Cathode) and `A` (Anode) terminals.
-  - Utilizes the onboard **Aerosemi MT3608 2A Step-Up Boost Converter** (~28V rail) with automatic current-limiting protection.
-  - Dedicated electronic Zener schematic graphic with iconic bent cathode wings and dynamic voltage classification (`Vz Breakdown`, `Open Rail >28V`, `Forward Diode Vf`, `Short Circuit`).
 - **Physical Keypad & Power Management**:
   - 6 physical buttons mapped: `POWER` (`PB13`), `OK / <` (`PB14`), `MENU / AUTO` (`PB15`), `UP / ^` (`PC8`), `DOWN / v` (`PC9`), and `TEST / >` (`PA8`).
   - Active power-hold soft latch (`PB7 = HIGH` on boot; hold POWER > 1.5s for graceful shutdown).
   - Backlight dimming (`MENU + UP/DOWN`) and relay toggle (`MENU + TEST`).
-  - Screen cycle order via MENU: `Component Tester` $\rightarrow$ `IR Decoder` $\rightarrow$ `Zener Tester` $\rightarrow$ `Console`.
+  - Screen cycle order via MENU: `Component Tester` $\rightarrow$ `IR Decoder` $\rightarrow$ `Zener Tester` $\rightarrow$ `SigGen & Voltmeter`.
 
 ---
 
-## 📌 Complete Pinout & Hardware Architecture
+## 📌 Complete Documentation & Guides
 
-Complete hardware schematics, ASCII wiring diagrams, and pin assignments are documented in:
-👉 **[docs/PINOUT.md](docs/PINOUT.md)** (Full pin tables and graphical schemes for both MCUs)  
-👉 **[docs/HARDWARE.md](docs/HARDWARE.md)** (Reverse engineering findings, circuit theory, and power design)
-
-### Quick Pin Summary
-
-| Subsystem | MCU | Active Pins | Function |
-| :--- | :---: | :---: | :--- |
-| **TFT 16-Bit Parallel Bus** | STM32F103C6 | `PB0..PB15`, `PA7` | 16-bit data bus (`D0`..`D15`) |
-| **TFT Control Strobes** | STM32F103C6 | `PC13` (`DCX`), `PC14` (`WRX`), `PC15` (`RDX`), `PA15` (`CSX`), `PA8` (`RESX`) | Bus timing & command select |
-| **Inter-MCU UART** | Both | `PA9` (TX) $\leftrightarrow$ `PA10` (RX), `PA2` (redundant) | 38,400 baud packet protocol |
-| **1-2-3 Socket ADC Sense**| STM32L083RZ | `PA3` (Pin 1), `PA4` (Pin 2), `PA5` (Pin 3) | 12-bit analog voltage taps |
-| **680 $\Omega$ Low Probes** | STM32L083RZ | `PA7` ($R_{L1}$), `PB1` ($R_{L2}$), `PB10` ($R_{L3}$) | Low-range resistance/capacitance probes |
-| **470 k$\Omega$ High Probes**| STM32L083RZ| `PB0` ($R_{H1}$), `PB2` ($R_{H2}$), `PB11` ($R_{H3}$) | High-range resistance/capacitance probes |
-| **6-Button Front Panel** | STM32L083RZ | `PB13`, `PB14`, `PB15`, `PC8`, `PC9`, `PA8` | Active LOW navigation keys |
-| **System Peripherals** | STM32L083RZ | `PB7` (Power Latch), `PC7` (Backlight), `PC6` (Buzzer), `PB6` (Relay), `PB9` (IR Rx) | Board control & audio |
+Comprehensive technical references, flashing guides, and hardware pinouts:
+* 👉 **[docs/FLASHING.md](docs/FLASHING.md)** — **Exhaustive Flashing Guide** (What to flash, programmers, SWD pinouts, reset quirks, automated scripts, and RTT streaming)
+* 👉 **[docs/PINOUT.md](docs/PINOUT.md)** — **Definitive Pinout Reference** (Complete pin tables for both MCUs, 14-pin ZIF socket mapping, keypad matrix, and top edge ports)
+* 👉 **[docs/HARDWARE.md](docs/HARDWARE.md)** — **Hardware & Reverse-Engineering Reference** (Dual-MCU bus architecture, ST7789 parallel display timing, MT3608 boost circuit)
 
 ---
 
 ## 🛠️ Building & Dual-MCU Flashing
 
-### Prerequisites
-1. [PlatformIO CLI](https://platformio.org/) or VSCode with PlatformIO.
-2. [SEGGER J-Link](https://www.segger.com/downloads/jlink/) (connected to the STM32L083 SWD header).
-3. CMSIS-DAP / DAPLink (connected to the STM32F103 SWD header).
-4. Python 3.8+.
-
-### Compile Both Targets
+### Quick Flash (Both MCUs)
 ```bash
-pio run
+python tools/flash.py --target all
 ```
 
-### Flash Both MCUs in One Automated Step
+### Flash Specific Target
 ```bash
-python tools/pylink_autoflash.py
+python tools/flash.py --target display   # Flash STM32F103C6 Display MCU via DAPLink / OpenOCD
+python tools/flash.py --target tester    # Flash STM32L083RZ Tester MCU via Segger J-Link
 ```
-*This tool automatically compiles both targets, catches the STM32L083 via Segger J-Link (press the front POWER button to power up), flashes the binary, and immediately proceeds to program the STM32F103 display controller via OpenOCD DAPLink.*
+
+### Compile Only
+```bash
+pio run -e display_f103   # Compile Display MCU firmware
+pio run -e tester_l083    # Compile Tester MCU firmware
+```
+
+For complete wiring diagrams, J-Link scripts, OpenOCD configuration, and troubleshooting steps, see **[docs/FLASHING.md](docs/FLASHING.md)**.
 
 ---
 
