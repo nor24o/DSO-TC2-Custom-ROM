@@ -2,11 +2,10 @@
  * @file main.cpp
  * @brief FNIRSI DSO-TC2 Master Display & Hardware Console (186 FPS)
  * 
- * Clean 320x240 UI layout with Component Tester 1-2-3 Socket mapping:
- * - Socket 1 = PA3 (ADC_IN3)
- * - Socket 2 = PA4 (ADC_IN4)
- * - Socket 3 = PA5 (ADC_IN5)
- * - Automatic resistor network discovery (RL 680 ohm & RH 470k ohm)
+ * Clean 320x240 UI layout with ZERO text overflow:
+ * - Strict 35-character line length limit (fits 320px width perfectly)
+ * - 6-button physical panel matrix
+ * - Component tester probe status
  */
 
 #include <Arduino.h>
@@ -26,42 +25,30 @@ struct L083Telemetry {
     uint32_t uptime_ms;
     uint32_t total_packets;
     bool connected;
-    char s1_rl[8];
-    char s1_rh[8];
-    char s2_rl[8];
-    char s2_rh[8];
-    char s3_rl[8];
-    char s3_rh[8];
 };
 
 static L083Telemetry l083_data = {
-    0, "NONE", "NONE", 0, 255, 3300, 0, 0, false,
-    "???", "???", "???", "???", "???", "???"
+    0, "NONE", "NONE", 0, 255, 3300, 0, 0, false
 };
 static char last_raw_pkt[64] = "Waiting for UART...";
 
 // Serial Parser
-static char rx_buf[160];
+static char rx_buf[128];
 static uint8_t rx_idx = 0;
 static uint32_t last_rx_time = 0;
 
 static void parse_packet(const char* pkt) {
     if (strncmp(pkt, "#TC2:", 5) != 0) return;
 
-    // Save for debug display
     strncpy(last_raw_pkt, pkt, sizeof(last_raw_pkt) - 1);
     last_raw_pkt[sizeof(last_raw_pkt) - 1] = '\0';
 
     uint32_t seq, vcc, uptime;
     char btn_str[24], pin_str[16];
     unsigned int mask_val, bl_val;
-    char s1_l[8] = "???", s1_h[8] = "???";
-    char s2_l[8] = "???", s2_h[8] = "???";
-    char s3_l[8] = "???", s3_h[8] = "???";
 
-    int n = sscanf(pkt + 5, "%lu,%23[^,],%15[^,],%x,%u,%lu,%lu,%7[^,],%7[^,],%7[^,],%7[^,],%7[^,],%7[^*]",
-                   &seq, btn_str, pin_str, &mask_val, &bl_val, &vcc, &uptime,
-                   s1_l, s1_h, s2_l, s2_h, s3_l, s3_h);
+    int n = sscanf(pkt + 5, "%lu,%23[^,],%15[^,],%x,%u,%lu,%lu",
+                   &seq, btn_str, pin_str, &mask_val, &bl_val, &vcc, &uptime);
 
     if (n >= 7) {
         l083_data.seq = seq;
@@ -74,15 +61,6 @@ static void parse_packet(const char* pkt) {
         l083_data.total_packets++;
         l083_data.connected = true;
         last_rx_time = millis();
-
-        if (n >= 13) {
-            strncpy(l083_data.s1_rl, s1_l, sizeof(l083_data.s1_rl) - 1);
-            strncpy(l083_data.s1_rh, s1_h, sizeof(l083_data.s1_rh) - 1);
-            strncpy(l083_data.s2_rl, s2_l, sizeof(l083_data.s2_rl) - 1);
-            strncpy(l083_data.s2_rh, s2_h, sizeof(l083_data.s2_rh) - 1);
-            strncpy(l083_data.s3_rl, s3_l, sizeof(l083_data.s3_rl) - 1);
-            strncpy(l083_data.s3_rh, s3_h, sizeof(l083_data.s3_rh) - 1);
-        }
     }
 }
 
@@ -110,7 +88,7 @@ static void poll_uart() {
     }
 }
 
-// Helper to draw a sleek button box
+// Sleek button box renderer
 static void draw_btn(int16_t x, int16_t y, int16_t w, int16_t h, 
                      const char* label, const char* sublabel, bool active) {
     uint16_t border_col = active ? COLOR_GREEN : COLOR_DARKCYAN;
@@ -139,14 +117,14 @@ void setup() {
     // Header Banner
     tft_fill_rect(0, 0, TFT_WIDTH, 24, 0x0010);
     tft_draw_hline(0, 24, TFT_WIDTH, COLOR_CYAN);
-    tft_print(8, 7, "DSO-TC2 COMPONENT TESTER ENGINE", COLOR_YELLOW, 0x0010, 1);
-    tft_print(250, 7, "186 FPS", COLOR_GREEN, 0x0010, 1);
+    tft_print(8, 7, "DSO-TC2 HARDWARE CONSOLE", COLOR_YELLOW, 0x0010, 1);
+    tft_print(256, 7, "186 FPS", COLOR_GREEN, 0x0010, 1);
 
     // Static Card 1: Keypad Matrix (Y: 28..138)
     tft_fill_rect(4, 28, 312, 108, COLOR_BLACK);
     tft_draw_rect(4, 28, 312, 108, COLOR_DARKCYAN);
 
-    // Static Card 2: System Health & Diagnostics (Y: 140..236)
+    // Static Card 2: Diagnostics (Y: 140..236)
     tft_fill_rect(4, 140, 312, 96, COLOR_BLACK);
     tft_draw_rect(4, 140, 312, 96, COLOR_YELLOW);
 }
@@ -159,7 +137,6 @@ void loop() {
         last_ui = millis();
 
         uint8_t m = l083_data.btn_mask;
-        // bit 0: UP, bit 1: DOWN, bit 2: OK, bit 3: TEST, bit 4: MENU, bit 5: POWER, bit 6: RELAY, bit 7: IR_ACTIVE
         bool b_up    = (m & 0x01) != 0;
         bool b_down  = (m & 0x02) != 0;
         bool b_ok    = (m & 0x04) != 0;
@@ -168,58 +145,59 @@ void loop() {
         bool b_pwr   = (m & 0x20) != 0;
         bool b_relay = (m & 0x40) != 0;
         bool b_ir    = (m & 0x80) != 0;
-        bool b_buzz  = ((m & 0x3F) != 0) || b_ir; // Buzzer active on any button/IR
+        bool b_buzz  = ((m & 0x3F) != 0) || b_ir;
 
-        // --- Render Keypad & Peripherals Matrix (3x3 Grid) ---
-        // Top Row (Y = 32)
+        // --- Render Keypad Matrix (3x3 Grid) ---
+        // Row 0 (Y = 32)
         draw_btn(12, 32, 92, 28, "POWER", "PB13", b_pwr);
         draw_btn(114, 32, 92, 28, "UP ^", "PC8", b_up);
         draw_btn(216, 32, 92, 28, "MENU", "PB15", b_menu);
 
-        // Middle Row (Y = 68)
+        // Row 1 (Y = 68)
         draw_btn(12, 68, 92, 28, "OK / <", "PB14", b_ok);
         draw_btn(114, 68, 92, 28, "RELAY", b_relay ? "ON:PB6" : "OFF:PB6", b_relay);
         draw_btn(216, 68, 92, 28, "TEST / >", "PA8", b_test);
 
-        // Bottom Row (Y = 104)
+        // Row 2 (Y = 104)
         draw_btn(12, 104, 92, 28, "BUZZER", b_buzz ? "ACTIVE" : "PC6", b_buzz);
         draw_btn(114, 104, 92, 28, "DOWN v", "PC9", b_down);
         draw_btn(216, 104, 92, 28, "IR RX", b_ir ? "SIGNAL!" : "PB9", b_ir);
 
-        // --- Render System Health & Diagnostics (Card 2) ---
-        char buf[96];
+        // --- Render Diagnostics (Card 2) - STRICT 35 CHARACTERS MAX PER LINE ---
+        char buf[64];
 
-        // Line 1: Active Event State
+        // Line 1: Active Event State (Y = 146)
         if (b_pwr) {
-            tft_print(10, 146, ">> POWER BUTTON PRESSED: PB13 (Hold 1.5s to shut down) << ", COLOR_RED, COLOR_BLACK, 1);
+            tft_print(10, 146, ">> POWER: PB13 (Hold 1.5s=Off)  ", COLOR_RED, COLOR_BLACK, 1);
         } else if (b_ir) {
-            tft_print(10, 146, ">> INFRARED DETECTED: Demodulated pulse on PB9! <<        ", COLOR_CYAN, COLOR_BLACK, 1);
+            tft_print(10, 146, ">> IR SIGNAL DETECTED ON PB9! <<", COLOR_CYAN, COLOR_BLACK, 1);
         } else if ((m & 0x3F) != 0) {
-            snprintf(buf, sizeof(buf), ">> BUTTON ACTIVE: %-6s (PIN: %-4s, MASK: 0x%02X) <<        ", 
+            snprintf(buf, sizeof(buf), ">> KEY: %-5s  PIN: %-4s (0x%02X)   ", 
                      l083_data.active_btn, l083_data.active_pin, m);
             tft_print(10, 146, buf, COLOR_GREEN, COLOR_BLACK, 1);
         } else {
-            tft_print(10, 146, "IDLE: Press TEST to scan 1-2-3 socket resistor networks    ", COLOR_LIGHTGREY, COLOR_BLACK, 1);
+            tft_print(10, 146, "STATUS: All 6 Keys & HW Ready   ", COLOR_LIGHTGREY, COLOR_BLACK, 1);
         }
 
-        // Line 2: 1-2-3 Component Tester Resistor Networks
-        snprintf(buf, sizeof(buf), "1(PA3):%s/%s  2(PA4):%s/%s  3(PA5):%s/%s        ",
-                 l083_data.s1_rl, l083_data.s1_rh,
-                 l083_data.s2_rl, l083_data.s2_rh,
-                 l083_data.s3_rl, l083_data.s3_rh);
-        tft_print(10, 164, buf, COLOR_YELLOW, COLOR_BLACK, 1);
+        // Line 2: 1-2-3 Component Tester ADC Sense Pins (Y = 164)
+        tft_print(10, 164, "TESTER SENSE: 1=PA3  2=PA4  3=PA5", COLOR_YELLOW, COLOR_BLACK, 1);
 
-        // Line 3: Power, Backlight, Buzzer & Relay Status
+        // Line 3: 6 Precision Measurement Resistors (Y = 182)
+        tft_print(10, 182, "RL:PA7,PB1,PB10 | RH:PB0,PB2,PB11", COLOR_CYAN, COLOR_BLACK, 1);
+
+        // Line 4: Power, Backlight, Relay & Buzzer (Y = 200)
         uint8_t bl_pct = (uint16_t)l083_data.backlight * 100 / 255;
-        snprintf(buf, sizeof(buf), "BL: PC7 (%2u%%) | PWR: PB7 | BUZZ: PC6 | RELAY: PB6 (%s)  ", bl_pct, b_relay ? "ON " : "OFF");
-        tft_print(10, 182, buf, COLOR_CYAN, COLOR_BLACK, 1);
+        snprintf(buf, sizeof(buf), "BL:%2u%% | PWR:PB7 | RLY:%-3s | BUZ:PC6", 
+                 bl_pct, b_relay ? "ON" : "OFF");
+        tft_print(10, 200, buf, COLOR_WHITE, COLOR_BLACK, 1);
 
-        // Line 4: Voltage & Packets
-        snprintf(buf, sizeof(buf), "VCC: %0.2fV | LINK: %-5lu pkts (%2u Hz) | UPTIME: %lus     ",
-                 l083_data.vcc_mv / 1000.0f, l083_data.total_packets, 25, l083_data.uptime_ms / 1000);
-        tft_print(10, 202, buf, COLOR_WHITE, COLOR_BLACK, 1);
-
-        // Line 5: Help & Control shortcuts
-        tft_print(10, 220, "Shortcuts: TEST=Rescan Resistors | M+RT=Relay | M+UP/DN=BL", 0x07E0, COLOR_BLACK, 1);
+        // Line 5: System Telemetry (Y = 218)
+        if (l083_data.connected) {
+            snprintf(buf, sizeof(buf), "VCC:%0.2fV | L083:ONLINE (%2uHz)     ",
+                     l083_data.vcc_mv / 1000.0f, 25);
+            tft_print(10, 218, buf, 0x07E0, COLOR_BLACK, 1);
+        } else {
+            tft_print(10, 218, "L083 STATUS: OFFLINE (Check UART)", COLOR_RED, COLOR_BLACK, 1);
+        }
     }
 }
