@@ -19,6 +19,7 @@ def on_progress(action, progress_string, percentage):
     sys.stdout.flush()
 
 def main():
+    sys.stdout.reconfigure(line_buffering=True)
     if not os.path.exists(BIN_PATH):
         print(f"[-] Error: binary not found at {BIN_PATH}")
         sys.exit(1)

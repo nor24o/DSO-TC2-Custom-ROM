@@ -76,9 +76,10 @@ q
         
     jlink_cmd = [
         JLINK_EXE,
+        "-SelectEmuBySN", "69650043",
         "-device", "STM32L083RZ",
         "-if", "SWD",
-        "-speed", "1000",
+        "-speed", "500",
         "-autoconnect", "1",
         "-NoGui", "1",
         "-CommanderScript", script_path

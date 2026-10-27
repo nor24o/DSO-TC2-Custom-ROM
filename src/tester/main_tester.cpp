@@ -104,7 +104,7 @@ static uint32_t read_vcc_mv() {
 }
 
 // ============================================================================
-// INFRARED REMOTE DECODER ENGINE (NEC / 38 kHz)
+// INFRARED REMOTE DECODER ENGINE (Multi-Protocol: NEC / Samsung / Sony / RAW)
 // ============================================================================
 struct IrDecodedData {
     char protocol[12];
@@ -118,70 +118,140 @@ struct IrDecodedData {
 
 static volatile IrDecodedData ir_data = {"NONE", 0, 0, 0, 0, 0, false};
 
+#define IR_RING_SIZE 128
+static volatile uint16_t ir_edge_buf[IR_RING_SIZE];
+static volatile uint8_t  ir_buf_head = 0;
+static volatile uint8_t  ir_buf_tail = 0;
+static volatile uint32_t ir_last_edge_us = 0;
+static volatile uint32_t ir_edge_count = 0;
+
+// High-speed ISR on PB9 (captures falling edges of 38 kHz demodulated bursts)
 static void ir_exti_isr() {
     uint32_t now = micros();
-    static uint32_t last_edge = 0;
-    uint32_t dt = now - last_edge;
-    last_edge = now;
+    static uint32_t prev_edge = 0;
+    uint32_t dt = now - prev_edge;
+    prev_edge = now;
+    ir_last_edge_us = now;
+    ir_edge_count++;
 
+    // Ignore ultra-short noise spikes (< 250 us)
+    if (dt < 250) return;
+    if (dt > 65000) dt = 65000;
+
+    uint8_t next = (ir_buf_head + 1) % IR_RING_SIZE;
+    if (next != ir_buf_tail) {
+        ir_edge_buf[ir_buf_head] = (uint16_t)dt;
+        ir_buf_head = next;
+    }
+}
+
+// Background IR Protocol Parser (Runs in loop())
+static void process_ir() {
+    static enum { IR_IDLE, IR_IN_FRAME } state = IR_IDLE;
     static uint32_t raw_shift = 0;
-    static uint8_t bit_count = 0;
-    static bool in_frame = false;
+    static uint8_t  bit_count = 0;
+    static char current_proto[12] = "NEC";
 
-    // NEC Leader Pulse: 9ms LOW + 4.5ms HIGH = 13.5ms between falling edges
-    if (dt >= 12000 && dt <= 15500) {
-        raw_shift = 0;
-        bit_count = 0;
-        in_frame = true;
-        return;
-    } else if (dt >= 10000 && dt < 12000) {
-        // NEC Repeat Code: 9ms LOW + 2.25ms HIGH = 11.25ms
-        if (ir_data.raw_code != 0) {
-            ir_data.repeat_count++;
-            ir_data.last_rx_ms = millis();
-            ir_data.has_new = true;
-        }
-        in_frame = false;
-        return;
-    }
+    while (ir_buf_tail != ir_buf_head) {
+        uint16_t dt = ir_edge_buf[ir_buf_tail];
+        ir_buf_tail = (ir_buf_tail + 1) % IR_RING_SIZE;
 
-    if (in_frame) {
-        if (dt >= 750 && dt <= 1500) {
-            // Bit 0 (~1.125 ms)
-            raw_shift = (raw_shift >> 1); // LSB first
-            bit_count++;
-        } else if (dt >= 1700 && dt <= 2850) {
-            // Bit 1 (~2.25 ms)
-            raw_shift = (raw_shift >> 1) | 0x80000000UL; // LSB first
-            bit_count++;
-        } else {
-            // Timing violation / noise glitch
-            in_frame = false;
-            return;
-        }
-
-        if (bit_count == 32) {
-            in_frame = false;
-            ir_data.raw_code = raw_shift;
-            uint8_t a0 = raw_shift & 0xFF;
-            uint8_t a1 = (raw_shift >> 8) & 0xFF;
-            uint8_t c0 = (raw_shift >> 16) & 0xFF;
-            uint8_t c1 = (raw_shift >> 24) & 0xFF;
-
-            if ((c0 ^ c1) == 0xFF) {
-                strcpy((char*)ir_data.protocol, "NEC");
-                ir_data.address = (a0 == (uint8_t)~a1) ? a0 : (a0 | ((uint16_t)a1 << 8));
-                ir_data.command = c0;
-            } else {
-                strcpy((char*)ir_data.protocol, "RAW");
-                ir_data.address = a0 | ((uint16_t)a1 << 8);
-                ir_data.command = c0;
+        // 1. Leader Detection
+        if (dt >= 10500 && dt <= 16500) {
+            // NEC Leader Pulse (9ms LOW + 4.5ms HIGH = ~13.5ms)
+            state = IR_IN_FRAME;
+            bit_count = 0;
+            raw_shift = 0;
+            strcpy(current_proto, "NEC");
+            continue;
+        } else if (dt >= 9000 && dt < 10500) {
+            // NEC Repeat Code (9ms LOW + 2.25ms HIGH = ~11.25ms)
+            if (ir_data.raw_code != 0) {
+                ir_data.repeat_count++;
+                ir_data.last_rx_ms = millis();
+                ir_data.has_new = true;
             }
-            ir_data.repeat_count = 0;
-            ir_data.last_rx_ms = millis();
-            ir_data.has_new = true;
+            state = IR_IDLE;
+            continue;
+        } else if (dt >= 7500 && dt < 9000) {
+            // Samsung Leader Pulse (4.5ms LOW + 4.5ms HIGH = ~9.0ms)
+            state = IR_IN_FRAME;
+            bit_count = 0;
+            raw_shift = 0;
+            strcpy(current_proto, "SAMS");
+            continue;
+        } else if (dt >= 2400 && dt <= 3600 && state == IR_IDLE) {
+            // Sony SIRC Leader Pulse (2.4ms LOW + 0.6ms HIGH = ~3.0ms)
+            state = IR_IN_FRAME;
+            bit_count = 0;
+            raw_shift = 0;
+            strcpy(current_proto, "SONY");
+            continue;
+        }
+
+        // 2. Data Bits (Pulse-Distance Decoded)
+        if (state == IR_IN_FRAME) {
+            if (dt >= 500 && dt < 1650) {
+                // Bit 0 (~1.125 ms)
+                raw_shift = (raw_shift >> 1); // LSB first
+                bit_count++;
+            } else if (dt >= 1650 && dt <= 3200) {
+                // Bit 1 (~2.25 ms)
+                raw_shift = (raw_shift >> 1) | 0x80000000UL; // LSB first
+                bit_count++;
+            } else {
+                // Potential stop bit or frame gap
+                if (bit_count >= 16) {
+                    goto commit_ir_frame;
+                } else {
+                    state = IR_IDLE;
+                }
+            }
+
+            if (bit_count == 32) {
+                goto commit_ir_frame;
+            }
         }
     }
+
+    // 3. Frame Flush on Inactivity Timeout (>14ms silence after receiving bits)
+    if (state == IR_IN_FRAME && (micros() - ir_last_edge_us > 14000UL)) {
+        if (bit_count >= 12) {
+            goto commit_ir_frame;
+        } else {
+            state = IR_IDLE;
+        }
+    }
+    return;
+
+commit_ir_frame:
+    state = IR_IDLE;
+    ir_data.raw_code = raw_shift;
+
+    if (bit_count == 32) {
+        uint8_t a0 = raw_shift & 0xFF;
+        uint8_t a1 = (raw_shift >> 8) & 0xFF;
+        uint8_t c0 = (raw_shift >> 16) & 0xFF;
+        uint8_t c1 = (raw_shift >> 24) & 0xFF;
+
+        if ((c0 ^ c1) == 0xFF) {
+            strcpy((char*)ir_data.protocol, current_proto);
+            ir_data.address = (a0 == (uint8_t)~a1) ? a0 : (a0 | ((uint16_t)a1 << 8));
+            ir_data.command = c0;
+        } else {
+            strcpy((char*)ir_data.protocol, "RAW32");
+            ir_data.address = a0 | ((uint16_t)a1 << 8);
+            ir_data.command = c0;
+        }
+    } else {
+        strcpy((char*)ir_data.protocol, "RAW");
+        ir_data.address = bit_count; // Store received bit count as address
+        ir_data.command = raw_shift & 0xFF;
+    }
+    ir_data.repeat_count = 0;
+    ir_data.last_rx_ms = millis();
+    ir_data.has_new = true;
+    bit_count = 0;
 }
 
 static void release_probes() {
@@ -451,26 +521,28 @@ static void test_pair(uint32_t pin_rl_a, uint32_t pin_rh_a, PinName sock_a, uint
     release_probes();
 
     // Symmetrical conduction with measurable current flowing through bottom 470k resistor:
-    // When open: Vb_rh == 0 mV and Va_rh_rev == 0 mV
-    if (vb_rh > 50 && va_rh > vb_rh && 
-        va_rh_rev > 50 && vb_rh_rev > va_rh_rev) {
+    // Reject leakage / stray voltages (< 380 mV, which is > 2.5 MOhm or open socket)
+    if (vb_rh > 380 && va_rh > vb_rh && 
+        va_rh_rev > 380 && vb_rh_rev > va_rh_rev) {
 
-        found = true;
-        strcpy(comp_res.type, "RESISTOR");
         uint32_t delta_v_fwd = va_rh - vb_rh;
         uint32_t delta_v_rev = vb_rh_rev - va_rh_rev;
         uint32_t r_fwd = (470000UL * delta_v_fwd) / (vb_rh > 0 ? vb_rh : 1);
         uint32_t r_rev = (470000UL * delta_v_rev) / (va_rh_rev > 0 ? va_rh_rev : 1);
         uint32_t r_ohm = (r_fwd + r_rev) / 2;
 
-        if (r_ohm < 1000000) {
-            snprintf(comp_res.value, sizeof(comp_res.value), "%lu.%01lu kOhm", r_ohm / 1000, (r_ohm % 1000) / 100);
-        } else {
-            snprintf(comp_res.value, sizeof(comp_res.value), "%lu.%02lu MOhm", r_ohm / 1000000, (r_ohm % 1000000) / 10000);
+        if (r_ohm <= 2500000UL) {
+            found = true;
+            strcpy(comp_res.type, "RESISTOR");
+            if (r_ohm < 1000000) {
+                snprintf(comp_res.value, sizeof(comp_res.value), "%lu.%01lu kOhm", r_ohm / 1000, (r_ohm % 1000) / 100);
+            } else {
+                snprintf(comp_res.value, sizeof(comp_res.value), "%lu.%02lu MOhm", r_ohm / 1000000, (r_ohm % 1000000) / 10000);
+            }
+            snprintf(comp_res.pinout, sizeof(comp_res.pinout), "Pins %d - %d", idx_a, idx_b);
+            rtt.printf(">> [COMPONENT DETECTED] RESISTOR (RH): %s (%s)\n", comp_res.value, comp_res.pinout);
+            return;
         }
-        snprintf(comp_res.pinout, sizeof(comp_res.pinout), "Pins %d - %d", idx_a, idx_b);
-        rtt.printf(">> [COMPONENT DETECTED] RESISTOR (RH): %s (%s)\n", comp_res.value, comp_res.pinout);
-        return;
     }
 
     // ------------------------------------------------------------------------
@@ -571,7 +643,7 @@ void setup() {
 #if defined(USART1)
     SerialUART1.setRx(PA10);
     SerialUART1.setTx(PA9);
-    SerialUART1.begin(38400);
+    SerialUART1.begin(115200);
 #endif
 
     rtt.println("\n\n========================================================");
@@ -581,6 +653,9 @@ void setup() {
 }
 
 void loop() {
+    // Process background IR demodulator pulse train from PB9
+    process_ir();
+
     uint16_t ra = (uint16_t)GPIOA->IDR;
     uint16_t rb = (uint16_t)GPIOB->IDR;
     uint16_t rc = (uint16_t)GPIOC->IDR;
@@ -595,18 +670,18 @@ void loop() {
     // IR Receiver on PB9 & Decoded Command Handler
     if (ir_data.has_new) {
         ir_data.has_new = false;
-        beep_square(4200, 20); // crisp high confirmation chime
+        beep_square(4200, 25); // crisp high confirmation chime
         rtt.printf(">> [IR DECODE] Proto: %s | Addr: 0x%04X | Cmd: 0x%02X | Raw: 0x%08lX | Rpt: %lu\n",
                    ir_data.protocol, ir_data.address, ir_data.command, ir_data.raw_code, ir_data.repeat_count);
 
         char ir_pkt[96];
-        snprintf(ir_pkt, sizeof(ir_pkt), "#IR:%s,%04X,%02X,%08lX,%lu*\n",
+        snprintf(ir_pkt, sizeof(ir_pkt), "#IR:%s,%04X,%02X,%08lX,%lu\n",
                  ir_data.protocol, ir_data.address, ir_data.command, ir_data.raw_code, ir_data.repeat_count);
 #if defined(USART1)
         SerialUART1.print(ir_pkt);
 #endif
     }
-    bool ir_active = (millis() - ir_data.last_rx_ms < 300);
+    bool ir_active = (millis() - ir_data.last_rx_ms < 400) || (micros() - ir_last_edge_us < 350000UL);
 
     // Relay Toggle: Hold MENU and press TEST (PA8)
     static uint32_t last_relay_toggle = 0;
@@ -710,17 +785,27 @@ void loop() {
         comp_res.s3_mv = (adc_read_value(PA_5, 12) * vcc) / 4095;
     }
 
-    // 25 Hz Telemetry Packet to Display MCU
+    // Periodic IR Activity Log to RTT (shows raw pulses detected on PB9)
+    static uint32_t last_ir_rtt_report = 0;
+    static uint32_t prev_ir_total = 0;
+    if (ir_edge_count != prev_ir_total && (millis() - last_ir_rtt_report >= 500)) {
+        last_ir_rtt_report = millis();
+        rtt.printf(">> [IR PULSE ACTIVITY] PB9 saw %lu new edges (Total: %lu)\n",
+                   ir_edge_count - prev_ir_total, ir_edge_count);
+        prev_ir_total = ir_edge_count;
+    }
+
+    // 20 Hz Telemetry Packet to Display MCU (every 50 ms at 115200 baud)
     static uint32_t last_tx = 0;
     static uint32_t seq = 0;
 
-    if (millis() - last_tx >= 40) {
+    if (millis() - last_tx >= 50) {
         last_tx = millis();
         seq++;
         uint32_t vcc = read_vcc_mv();
 
         char buf[160];
-        snprintf(buf, sizeof(buf), "#TC2:%lu,%s,%s,%02X,%u,%lu,%lu,%s,%s,%s,%u,%u,%u*\n",
+        snprintf(buf, sizeof(buf), "#TC2:%lu,%s,%s,%02X,%u,%lu,%lu,%s,%s,%s,%u,%u,%u\n",
                  seq, active_btn, active_pin, btn_mask, backlight_level, vcc, millis(),
                  comp_res.type, comp_res.value, comp_res.pinout,
                  comp_res.s1_mv, comp_res.s2_mv, comp_res.s3_mv);

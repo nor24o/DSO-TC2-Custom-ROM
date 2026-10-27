@@ -162,7 +162,7 @@ static void poll_uart() {
         }
     }
 
-    if (millis() - last_rx_time > 1000) {
+    if (millis() - last_rx_time > 1500) {
         l083_data.connected = false;
     }
 }
@@ -390,7 +390,7 @@ static void draw_screen_background() {
 
 void setup() {
     tft_init();
-    Serial1.begin(38400);
+    Serial1.begin(115200);
     draw_screen_background();
 }
 
@@ -414,8 +414,9 @@ void loop() {
     }
 
     static uint32_t last_ui = 0;
-    if (millis() - last_ui >= 40) { // 25 Hz UI refresh
+    if (millis() - last_ui >= 50) { // 20 Hz UI refresh
         last_ui = millis();
+        poll_uart();
 
         bool b_up    = (m & 0x01) != 0;
         bool b_down  = (m & 0x02) != 0;
@@ -466,13 +467,14 @@ void loop() {
 
             if (l083_data.connected) {
                 snprintf(buf, sizeof(buf), "VCC:%0.2fV | L083:ONLINE (%2uHz)     ",
-                         l083_data.vcc_mv / 1000.0f, 25);
+                         l083_data.vcc_mv / 1000.0f, 20);
                 tft_print(10, 208, buf, 0x07E0, COLOR_BLACK, 1);
             } else {
                 tft_print(10, 208, "L083 STATUS: OFFLINE (Check UART)", COLOR_RED, COLOR_BLACK, 1);
             }
 
             tft_print(10, 222, "Press MENU to switch to Tester  ", COLOR_LIGHTGREY, COLOR_BLACK, 1);
+            poll_uart();
 
         } else if (screen_mode == 1) {
             // ================================================================
@@ -532,9 +534,10 @@ void loop() {
             tft_print(12, 198, "Sense: PA3(1), PA4(2), PA5(3)     ", COLOR_CYAN, COLOR_BLACK, 1);
             tft_print(12, 212, "TEST=Measure | MENU=Switch IR Dec ", 0x07E0, COLOR_BLACK, 1);
 
-            snprintf(buf, sizeof(buf), "VCC: %0.2fV | L083: ONLINE (25 Hz)   ",
+            snprintf(buf, sizeof(buf), "VCC: %0.2fV | L083: ONLINE (20 Hz)   ",
                      l083_data.vcc_mv / 1000.0f);
             tft_print(12, 224, buf, COLOR_WHITE, COLOR_BLACK, 1);
+            poll_uart();
 
         } else {
             // ================================================================
@@ -613,6 +616,7 @@ void loop() {
 
             tft_print(12, 212, "Sensor: PB9 Demodulator (Active-L)", COLOR_LIGHTGREY, COLOR_BLACK, 1);
             tft_print(12, 224, "MENU=Next Screen | TEST=Clear Log ", 0x07E0, COLOR_BLACK, 1);
+            poll_uart();
         }
     }
 }
