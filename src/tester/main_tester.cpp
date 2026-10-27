@@ -130,12 +130,14 @@ static void ir_exti_isr() {
     uint32_t now = micros();
     static uint32_t prev_edge = 0;
     uint32_t dt = now - prev_edge;
+
+    // Reject ultra-short carrier spikes (< 320 us) WITHOUT updating prev_edge!
+    if (dt < 320) return;
+
     prev_edge = now;
     ir_last_edge_us = now;
     ir_edge_count++;
 
-    // Ignore ultra-short noise spikes (< 250 us)
-    if (dt < 250) return;
     if (dt > 65000) dt = 65000;
 
     uint8_t next = (ir_buf_head + 1) % IR_RING_SIZE;
@@ -157,14 +159,14 @@ static void process_ir() {
         ir_buf_tail = (ir_buf_tail + 1) % IR_RING_SIZE;
 
         // 1. Leader Detection
-        if (dt >= 10500 && dt <= 16500) {
+        if (dt >= 11500 && dt <= 16500) {
             // NEC Leader Pulse (9ms LOW + 4.5ms HIGH = ~13.5ms)
             state = IR_IN_FRAME;
             bit_count = 0;
             raw_shift = 0;
             strcpy(current_proto, "NEC");
             continue;
-        } else if (dt >= 9000 && dt < 10500) {
+        } else if (dt >= 9500 && dt < 11500) {
             // NEC Repeat Code (9ms LOW + 2.25ms HIGH = ~11.25ms)
             if (ir_data.raw_code != 0) {
                 ir_data.repeat_count++;
@@ -173,7 +175,7 @@ static void process_ir() {
             }
             state = IR_IDLE;
             continue;
-        } else if (dt >= 7500 && dt < 9000) {
+        } else if (dt >= 7500 && dt < 9500) {
             // Samsung Leader Pulse (4.5ms LOW + 4.5ms HIGH = ~9.0ms)
             state = IR_IN_FRAME;
             bit_count = 0;
@@ -191,16 +193,19 @@ static void process_ir() {
 
         // 2. Data Bits (Pulse-Distance Decoded)
         if (state == IR_IN_FRAME) {
-            if (dt >= 500 && dt < 1650) {
+            if (dt >= 650 && dt < 1650) {
                 // Bit 0 (~1.125 ms)
                 raw_shift = (raw_shift >> 1); // LSB first
                 bit_count++;
-            } else if (dt >= 1650 && dt <= 3200) {
+            } else if (dt >= 1650 && dt <= 3000) {
                 // Bit 1 (~2.25 ms)
                 raw_shift = (raw_shift >> 1) | 0x80000000UL; // LSB first
                 bit_count++;
+            } else if (dt < 650) {
+                // Minor noise spike during frame — ignore without aborting
+                continue;
             } else {
-                // Potential stop bit or frame gap
+                // Inter-frame gap or stop bit (> 3000 us)
                 if (bit_count >= 16) {
                     goto commit_ir_frame;
                 } else {
@@ -214,8 +219,8 @@ static void process_ir() {
         }
     }
 
-    // 3. Frame Flush on Inactivity Timeout (>14ms silence after receiving bits)
-    if (state == IR_IN_FRAME && (micros() - ir_last_edge_us > 14000UL)) {
+    // 3. Frame Flush on Inactivity Timeout (>18ms silence after receiving bits)
+    if (state == IR_IN_FRAME && (micros() - ir_last_edge_us > 18000UL)) {
         if (bit_count >= 12) {
             goto commit_ir_frame;
         } else {
@@ -234,7 +239,7 @@ commit_ir_frame:
         uint8_t c0 = (raw_shift >> 16) & 0xFF;
         uint8_t c1 = (raw_shift >> 24) & 0xFF;
 
-        if ((c0 ^ c1) == 0xFF) {
+        if ((uint8_t)(c0 ^ c1) == 0xFF) {
             strcpy((char*)ir_data.protocol, current_proto);
             ir_data.address = (a0 == (uint8_t)~a1) ? a0 : (a0 | ((uint16_t)a1 << 8));
             ir_data.command = c0;
@@ -283,157 +288,103 @@ static void discharge_socket(uint16_t ms = 30) {
 // COMPONENT TESTER MEASUREMENT ENGINE
 // ============================================================================
 struct ComponentResult {
-    char type[16];     // "NONE", "RESISTOR", "DIODE", "CAPACITOR", "SHORT"
+    char type[16];     // "NONE", "RESISTOR", "DIODE", "CAPACITOR", "NPN", "PNP", "N-MOS", "P-MOS", "SHORT"
     char value[24];    // "1.00 kOhm", "100.0 nF", "Vf=0.68V"
-    char pinout[20];   // "Pins 1 - 2", "1(A) -> 2(K)"
+    char pinout[20];   // "Pins 1 - 2", "1(A) -> 2(K)", "B:1 C:2 E:3", "G:1 D:2 S:3"
     uint16_t s1_mv;
     uint16_t s2_mv;
     uint16_t s3_mv;
 };
 
-static ComponentResult comp_res = {"NONE", "No component", "---", 0, 0, 0};
+static ComponentResult comp_res = {"NONE", "No component", "Pins 1-2-3 Open", 0, 0, 0};
 
-// Capacitance measurement between two terminals
-// Returns capacitance in pF, or 0 if not a capacitor
-static uint32_t measure_capacitance(uint32_t pin_rl_a, uint32_t pin_rh_a, PinName sock_a,
-                                    uint32_t pin_rl_b, PinName sock_b,
-                                    uint32_t vcc_mv) {
-    // 1. Discharge socket thoroughly
-    discharge_socket(35);
+struct SocketDef {
+    uint32_t pin_rl;
+    uint32_t pin_rh;
+    PinName adc_pin;
+    uint8_t idx;
+};
+static const SocketDef PROBES[3] = {
+    {PIN_RL1, PIN_RH1, PA_3, 1},
+    {PIN_RL2, PIN_RH2, PA_4, 2},
+    {PIN_RL3, PIN_RH3, PA_5, 3}
+};
 
-    // 2. Connect Terminal B to direct GND
-    pinMode(pin_rl_b, OUTPUT);
-    digitalWrite(pin_rl_b, LOW);
+struct DiodeDetection {
+    uint8_t a;     // Anode index (1..3)
+    uint8_t k;     // Cathode index (1..3)
+    uint16_t vf_mv;
+};
 
-    // 3. Configure Terminal A as digital Input (floating, no pull)
-    uint8_t p = (sock_a & 0x0F);
-    GPIOA->MODER &= ~(3U << (p * 2));
-    GPIOA->PUPDR &= ~(3U << (p * 2));
+// Returns diode forward voltage in mV if conducting from a_idx -> b_idx, or 0 if non-conducting
+static uint16_t probe_diode_direction(uint8_t a_idx, uint8_t b_idx, uint32_t vcc_mv) {
+    const SocketDef& probe_a = PROBES[a_idx];
+    const SocketDef& probe_b = PROBES[b_idx];
 
-    // Verify baseline voltage is low
-    if ((GPIOA->IDR >> p) & 1U) {
-        discharge_socket(50);
-        GPIOA->MODER &= ~(3U << (p * 2));
-        GPIOA->PUPDR &= ~(3U << (p * 2));
-        if ((GPIOA->IDR >> p) & 1U) {
-            release_probes();
-            return 0;
-        }
-    }
+    // Forward drive via RL (680R): A=HIGH, B=LOW
+    pinMode(probe_a.pin_rl, OUTPUT);
+    digitalWrite(probe_a.pin_rl, HIGH);
+    pinMode(probe_b.pin_rl, OUTPUT);
+    digitalWrite(probe_b.pin_rl, LOW);
+    delayMicroseconds(400);
 
-    // Step A: Charge through RH (470k ohm) for 20 pF .. 1 uF
-    pinMode(pin_rh_a, OUTPUT);
-    digitalWrite(pin_rh_a, HIGH);
-    uint32_t t_start = micros();
-
-    // Fast register polling (<150 ns per cycle)
-    while (!((GPIOA->IDR >> p) & 1U)) {
-        if ((micros() - t_start) > 200000UL) break; // 200 ms timeout (>0.5 uF)
-    }
-    uint32_t t_elapsed = micros() - t_start;
-    pinMode(pin_rh_a, INPUT); // Float charge drive immediately!
-
-    // If it tripped within 200 ms:
-    if (t_elapsed < 200000UL) {
-        // Stray capacitance on open socket flips in ~14 us; ignore anything under 22 us
-        if (t_elapsed < 22) {
-            discharge_socket(15);
-            return 0;
-        }
-
-        // Verify charge retention: a real capacitor holds its voltage
-        delayMicroseconds(800);
-        uint32_t adc_hold = adc_read_value(sock_a, 12);
-        if (adc_hold < 900) {
-            // Dropped below ~0.7V -> resistive or leaky, not a capacitor
-            discharge_socket(20);
-            return 0;
-        }
-
-        // Calculate capacitance from time constant tau:
-        float v_ratio = (float)adc_hold / 4095.0f;
-        float k = (v_ratio > 0.15f && v_ratio < 0.98f) ? -logf(1.0f - v_ratio) : 0.8223f;
-
-        // C (pF) = (t_us * 1000) / (k * 470)
-        uint32_t cap_pf = (uint32_t)(((float)t_elapsed * 1000.0f) / (k * 470.0f));
-
-        discharge_socket(30);
-        return cap_pf;
-    }
-
-    // Step B: Large Capacitor (> 0.5 uF up to 5000 uF) charged via RL (680 ohm)
-    discharge_socket(80);
-    pinMode(pin_rl_b, OUTPUT);
-    digitalWrite(pin_rl_b, LOW);
-
-    GPIOA->MODER &= ~(3U << (p * 2));
-    GPIOA->PUPDR &= ~(3U << (p * 2));
-
-    pinMode(pin_rl_a, OUTPUT);
-    digitalWrite(pin_rl_a, HIGH);
-    t_start = micros();
-
-    while (!((GPIOA->IDR >> p) & 1U)) {
-        if ((micros() - t_start) > 3500000UL) break; // 3.5s timeout (~7000 uF)
-    }
-    t_elapsed = micros() - t_start;
-    pinMode(pin_rl_a, INPUT);
-
-    if (t_elapsed > 100 && t_elapsed < 3500000UL) {
-        delayMicroseconds(1000);
-        uint32_t adc_hold = adc_read_value(sock_a, 12);
-        if (adc_hold >= 900) {
-            float v_ratio = (float)adc_hold / 4095.0f;
-            float k = (v_ratio > 0.15f && v_ratio < 0.98f) ? -logf(1.0f - v_ratio) : 0.8223f;
-            // C_nF = (t_us * 1000) / (k * 680)
-            uint32_t cap_nf = (uint32_t)(((float)t_elapsed * 1000.0f) / (k * 680.0f));
-            discharge_socket(60);
-            return cap_nf * 1000UL; // in pF
-        }
-    }
-
-    discharge_socket(30);
-    return 0;
-}
-
-static void test_pair(uint32_t pin_rl_a, uint32_t pin_rh_a, PinName sock_a, uint8_t idx_a,
-                      uint32_t pin_rl_b, uint32_t pin_rh_b, PinName sock_b, uint8_t idx_b,
-                      uint32_t vcc_mv, bool &found) {
-    if (found) return;
-
-    // 1. Forward probe with RL (680): A=HIGH, B=LOW
-    pinMode(pin_rl_a, OUTPUT);
-    digitalWrite(pin_rl_a, HIGH);
-    pinMode(pin_rl_b, OUTPUT);
-    digitalWrite(pin_rl_b, LOW);
-    delayMicroseconds(300);
-
-    uint32_t va_fwd = (adc_read_value(sock_a, 12) * vcc_mv) / 4095;
-    uint32_t vb_fwd = (adc_read_value(sock_b, 12) * vcc_mv) / 4095;
-
+    uint32_t va = (adc_read_value(probe_a.adc_pin, 12) * vcc_mv) / 4095;
+    uint32_t vb = (adc_read_value(probe_b.adc_pin, 12) * vcc_mv) / 4095;
     release_probes();
     delayMicroseconds(100);
 
-    // 2. Reverse probe with RL (680): B=HIGH, A=LOW
-    pinMode(pin_rl_b, OUTPUT);
-    digitalWrite(pin_rl_b, HIGH);
-    pinMode(pin_rl_a, OUTPUT);
-    digitalWrite(pin_rl_a, LOW);
-    delayMicroseconds(300);
+    // Reverse drive: B=HIGH, A=LOW
+    pinMode(probe_b.pin_rl, OUTPUT);
+    digitalWrite(probe_b.pin_rl, HIGH);
+    pinMode(probe_a.pin_rl, OUTPUT);
+    digitalWrite(probe_a.pin_rl, LOW);
+    delayMicroseconds(400);
 
-    uint32_t vb_rev = (adc_read_value(sock_b, 12) * vcc_mv) / 4095;
-    uint32_t va_rev = (adc_read_value(sock_a, 12) * vcc_mv) / 4095;
-
+    uint32_t va_rev = (adc_read_value(probe_a.adc_pin, 12) * vcc_mv) / 4095;
     release_probes();
 
-    // ------------------------------------------------------------------------
-    // CASE A: CONTINUITY / SHORT (< 15 Ohm)
-    // ------------------------------------------------------------------------
+    // Diode criteria:
+    // 1. Current flows into cathode in forward direction (vb > 60 mV)
+    // 2. Forward drop: 150 mV <= Vf <= 2800 mV
+    // 3. Reverse direction is non-conducting (va_rev < 80 mV)
+    if (vb > 60 && va > vb && (va - vb >= 150) && (va - vb <= 2800) && va_rev < 80) {
+        return (uint16_t)(va - vb);
+    }
+    return 0;
+}
+
+// Returns true if resistor or short detected between a_idx and b_idx
+static bool test_resistor(uint8_t a_idx, uint8_t b_idx, uint32_t vcc_mv) {
+    const SocketDef& probe_a = PROBES[a_idx];
+    const SocketDef& probe_b = PROBES[b_idx];
+
+    // 1. RL Low-Range Test (15 Ohm .. 25 kOhm)
+    pinMode(probe_a.pin_rl, OUTPUT);
+    digitalWrite(probe_a.pin_rl, HIGH);
+    pinMode(probe_b.pin_rl, OUTPUT);
+    digitalWrite(probe_b.pin_rl, LOW);
+    delayMicroseconds(400);
+
+    uint32_t va_fwd = (adc_read_value(probe_a.adc_pin, 12) * vcc_mv) / 4095;
+    uint32_t vb_fwd = (adc_read_value(probe_b.adc_pin, 12) * vcc_mv) / 4095;
+    release_probes();
+    delayMicroseconds(100);
+
+    pinMode(probe_b.pin_rl, OUTPUT);
+    digitalWrite(probe_b.pin_rl, HIGH);
+    pinMode(probe_a.pin_rl, OUTPUT);
+    digitalWrite(probe_a.pin_rl, LOW);
+    delayMicroseconds(400);
+
+    uint32_t vb_rev = (adc_read_value(probe_b.adc_pin, 12) * vcc_mv) / 4095;
+    uint32_t va_rev = (adc_read_value(probe_a.adc_pin, 12) * vcc_mv) / 4095;
+    release_probes();
+
+    // Check Short (< 15 Ohm)
     if (vb_fwd > 1200 && va_rev > 1200) {
         int32_t diff_fwd = abs((int32_t)va_fwd - (int32_t)vb_fwd);
         int32_t diff_rev = abs((int32_t)vb_rev - (int32_t)va_rev);
         if (diff_fwd < 140 && diff_rev < 140) {
-            found = true;
             strcpy(comp_res.type, "SHORT");
             uint32_t avg_diff = (diff_fwd + diff_rev) / 2;
             uint32_t r_ohm = (680UL * avg_diff) / (vb_fwd > 0 ? vb_fwd : 1);
@@ -442,160 +393,391 @@ static void test_pair(uint32_t pin_rl_a, uint32_t pin_rh_a, PinName sock_a, uint
             } else {
                 snprintf(comp_res.value, sizeof(comp_res.value), "%lu.%lu Ohm", r_ohm, (avg_diff * 6800UL / vb_fwd) % 10);
             }
-            snprintf(comp_res.pinout, sizeof(comp_res.pinout), "Pins %d - %d", idx_a, idx_b);
+            snprintf(comp_res.pinout, sizeof(comp_res.pinout), "Pins %d - %d", probe_a.idx, probe_b.idx);
             rtt.printf(">> [COMPONENT DETECTED] SHORT: %s (%s)\n", comp_res.value, comp_res.pinout);
-            return;
+            return true;
         }
     }
 
-    // ------------------------------------------------------------------------
-    // CASE B: DIODE / LED (Vf = 0.2V .. 3.0V)
-    // ------------------------------------------------------------------------
-    bool fwd_diode = (vb_fwd > 50) && (va_fwd > vb_fwd + 120) && (va_rev < 60);
-    bool rev_diode = (va_rev > 50) && (vb_rev > va_rev + 120) && (vb_fwd < 60);
-
-    if (fwd_diode) {
-        found = true;
-        strcpy(comp_res.type, "DIODE");
-        uint32_t vf_mv = va_fwd - vb_fwd;
-        snprintf(comp_res.value, sizeof(comp_res.value), "Vf=%lu.%02luV", vf_mv / 1000, (vf_mv % 1000) / 10);
-        snprintf(comp_res.pinout, sizeof(comp_res.pinout), "%d(A) -> %d(K)", idx_a, idx_b);
-        rtt.printf(">> [COMPONENT DETECTED] DIODE: %s (%s)\n", comp_res.value, comp_res.pinout);
-        return;
-    } else if (rev_diode) {
-        found = true;
-        strcpy(comp_res.type, "DIODE");
-        uint32_t vf_mv = vb_rev - va_rev;
-        snprintf(comp_res.value, sizeof(comp_res.value), "Vf=%lu.%02luV", vf_mv / 1000, (vf_mv % 1000) / 10);
-        snprintf(comp_res.pinout, sizeof(comp_res.pinout), "%d(A) -> %d(K)", idx_b, idx_a);
-        rtt.printf(">> [COMPONENT DETECTED] DIODE: %s (%s)\n", comp_res.value, comp_res.pinout);
-        return;
-    }
-
-    // ------------------------------------------------------------------------
-    // CASE C: LOW/MID RESISTOR (15 Ohm .. 25 kOhm via 680R)
-    // ------------------------------------------------------------------------
+    // Check RL Resistor
     bool fwd_conducts = (vb_fwd > 55) && (va_fwd > vb_fwd);
     bool rev_conducts = (va_rev > 55) && (vb_rev > va_rev);
-
     if (fwd_conducts && rev_conducts) {
-        found = true;
         strcpy(comp_res.type, "RESISTOR");
         uint32_t delta_v = va_fwd - vb_fwd;
         uint32_t r_ohm = (680UL * delta_v) / (vb_fwd > 0 ? vb_fwd : 1);
-
         if (r_ohm < 1000) {
             snprintf(comp_res.value, sizeof(comp_res.value), "%lu Ohm", r_ohm);
         } else {
             snprintf(comp_res.value, sizeof(comp_res.value), "%lu.%02lu kOhm", r_ohm / 1000, (r_ohm % 1000) / 10);
         }
-        snprintf(comp_res.pinout, sizeof(comp_res.pinout), "Pins %d - %d", idx_a, idx_b);
+        snprintf(comp_res.pinout, sizeof(comp_res.pinout), "Pins %d - %d", probe_a.idx, probe_b.idx);
         rtt.printf(">> [COMPONENT DETECTED] RESISTOR (RL): %s (%s)\n", comp_res.value, comp_res.pinout);
-        return;
+        return true;
     }
 
-    // ------------------------------------------------------------------------
-    // CASE D: HIGH-RANGE RESISTOR (30 kOhm .. 20 MOhm via dual RH 470k)
-    // ------------------------------------------------------------------------
-    // Forward: Drive A via RH HIGH (470k to 3.3V), Drive B via RH LOW (470k to GND)
-    pinMode(pin_rh_a, OUTPUT);
-    digitalWrite(pin_rh_a, HIGH);
-    pinMode(pin_rh_b, OUTPUT);
-    digitalWrite(pin_rh_b, LOW);
+    // 2. RH High-Range Test (25 kOhm .. 2.5 MOhm)
+    pinMode(probe_a.pin_rh, OUTPUT);
+    digitalWrite(probe_a.pin_rh, HIGH);
+    pinMode(probe_b.pin_rh, OUTPUT);
+    digitalWrite(probe_b.pin_rh, LOW);
     delayMicroseconds(1000);
 
-    uint32_t va_rh = (adc_read_value(sock_a, 12) * vcc_mv) / 4095;
-    uint32_t vb_rh = (adc_read_value(sock_b, 12) * vcc_mv) / 4095;
+    uint32_t va_rh_1 = (adc_read_value(probe_a.adc_pin, 12) * vcc_mv) / 4095;
+    uint32_t vb_rh_1 = (adc_read_value(probe_b.adc_pin, 12) * vcc_mv) / 4095;
+
+    // Transient check: sample again after 5 ms.
+    // If vb_rh decays, it's a capacitor charging, NOT a resistor!
+    delay(5);
+    uint32_t vb_rh_2 = (adc_read_value(probe_b.adc_pin, 12) * vcc_mv) / 4095;
     release_probes();
     delayMicroseconds(200);
 
-    // Reverse: Drive B via RH HIGH (470k to 3.3V), Drive A via RH LOW (470k to GND)
-    pinMode(pin_rh_b, OUTPUT);
-    digitalWrite(pin_rh_b, HIGH);
-    pinMode(pin_rh_a, OUTPUT);
-    digitalWrite(pin_rh_a, LOW);
+    pinMode(probe_b.pin_rh, OUTPUT);
+    digitalWrite(probe_b.pin_rh, HIGH);
+    pinMode(probe_a.pin_rh, OUTPUT);
+    digitalWrite(probe_a.pin_rh, LOW);
     delayMicroseconds(1000);
 
-    uint32_t vb_rh_rev = (adc_read_value(sock_b, 12) * vcc_mv) / 4095;
-    uint32_t va_rh_rev = (adc_read_value(sock_a, 12) * vcc_mv) / 4095;
+    uint32_t vb_rh_rev_1 = (adc_read_value(probe_b.adc_pin, 12) * vcc_mv) / 4095;
+    uint32_t va_rh_rev_1 = (adc_read_value(probe_a.adc_pin, 12) * vcc_mv) / 4095;
+    delay(5);
+    uint32_t va_rh_rev_2 = (adc_read_value(probe_a.adc_pin, 12) * vcc_mv) / 4095;
     release_probes();
 
-    // Symmetrical conduction with measurable current flowing through bottom 470k resistor:
-    // Reject leakage / stray voltages (< 380 mV, which is > 2.5 MOhm or open socket)
-    if (vb_rh > 380 && va_rh > vb_rh && 
-        va_rh_rev > 380 && vb_rh_rev > va_rh_rev) {
+    // Symmetrical steady conduction:
+    // Voltage must be above 380 mV AND must be STEADY (|sample1 - sample2| < 90 mV)
+    bool fwd_steady = (abs((int32_t)vb_rh_1 - (int32_t)vb_rh_2) < 90);
+    bool rev_steady = (abs((int32_t)va_rh_rev_1 - (int32_t)va_rh_rev_2) < 90);
 
-        uint32_t delta_v_fwd = va_rh - vb_rh;
-        uint32_t delta_v_rev = vb_rh_rev - va_rh_rev;
-        uint32_t r_fwd = (470000UL * delta_v_fwd) / (vb_rh > 0 ? vb_rh : 1);
-        uint32_t r_rev = (470000UL * delta_v_rev) / (va_rh_rev > 0 ? va_rh_rev : 1);
-        uint32_t r_ohm = (r_fwd + r_rev) / 2;
-
+    if (fwd_steady && rev_steady && vb_rh_2 > 380 && va_rh_rev_2 > 380) {
+        uint32_t delta_v = va_rh_1 - vb_rh_1;
+        uint32_t r_ohm = (470000UL * delta_v) / (vb_rh_2 > 0 ? vb_rh_2 : 1);
         if (r_ohm <= 2500000UL) {
-            found = true;
             strcpy(comp_res.type, "RESISTOR");
             if (r_ohm < 1000000) {
                 snprintf(comp_res.value, sizeof(comp_res.value), "%lu.%01lu kOhm", r_ohm / 1000, (r_ohm % 1000) / 100);
             } else {
                 snprintf(comp_res.value, sizeof(comp_res.value), "%lu.%02lu MOhm", r_ohm / 1000000, (r_ohm % 1000000) / 10000);
             }
-            snprintf(comp_res.pinout, sizeof(comp_res.pinout), "Pins %d - %d", idx_a, idx_b);
+            snprintf(comp_res.pinout, sizeof(comp_res.pinout), "Pins %d - %d", probe_a.idx, probe_b.idx);
             rtt.printf(">> [COMPONENT DETECTED] RESISTOR (RH): %s (%s)\n", comp_res.value, comp_res.pinout);
-            return;
+            return true;
         }
     }
 
-    // ------------------------------------------------------------------------
-    // CASE E: CAPACITANCE TEST (65 pF .. 5000 uF)
-    // ------------------------------------------------------------------------
-    uint32_t cap_pf = measure_capacitance(pin_rl_a, pin_rh_a, sock_a, pin_rl_b, sock_b, vcc_mv);
-    if (cap_pf > 65) {
-        found = true;
-        strcpy(comp_res.type, "CAPACITOR");
-        uint32_t cap_eff = (cap_pf > 38) ? (cap_pf - 38) : cap_pf; // Subtract baseline stray
-        if (cap_eff < 1000) {
-            snprintf(comp_res.value, sizeof(comp_res.value), "%lu pF", cap_eff);
-        } else if (cap_eff < 1000000) {
-            uint32_t nf_x10 = (cap_eff + 50) / 100;
-            snprintf(comp_res.value, sizeof(comp_res.value), "%lu.%lu nF", nf_x10 / 10, nf_x10 % 10);
-        } else {
-            uint32_t uf_x10 = (cap_eff + 50000) / 100000;
-            snprintf(comp_res.value, sizeof(comp_res.value), "%lu.%lu uF", uf_x10 / 10, uf_x10 % 10);
+    return false;
+}
+
+// Returns true if a capacitor was detected and measured, filling comp_res
+static bool test_capacitance(uint8_t a_idx, uint8_t b_idx, uint32_t vcc_mv) {
+    discharge_socket(40);
+
+    const SocketDef& probe_a = PROBES[a_idx];
+    const SocketDef& probe_b = PROBES[b_idx];
+
+    // Connect Terminal B to direct GND
+    pinMode(probe_b.pin_rl, OUTPUT);
+    digitalWrite(probe_b.pin_rl, LOW);
+
+    // Terminal A as floating digital input
+    uint8_t p = (probe_a.adc_pin & 0x0F);
+    GPIOA->MODER &= ~(3U << (p * 2));
+    GPIOA->PUPDR &= ~(3U << (p * 2));
+
+    if ((GPIOA->IDR >> p) & 1U) {
+        discharge_socket(40);
+        GPIOA->MODER &= ~(3U << (p * 2));
+        if ((GPIOA->IDR >> p) & 1U) {
+            release_probes();
+            return false;
         }
-        snprintf(comp_res.pinout, sizeof(comp_res.pinout), "Pins %d - %d", idx_a, idx_b);
-        rtt.printf(">> [COMPONENT DETECTED] CAPACITOR: %s (%s)\n", comp_res.value, comp_res.pinout);
-        return;
     }
+
+    // Phase 1: Small/Medium caps (25 pF .. 1 uF) charged via RH (470k)
+    pinMode(probe_a.pin_rh, OUTPUT);
+    digitalWrite(probe_a.pin_rh, HIGH);
+    uint32_t t_start = micros();
+
+    while (!((GPIOA->IDR >> p) & 1U)) {
+        if ((micros() - t_start) > 220000UL) break; // 220 ms timeout
+    }
+    uint32_t t_elapsed = micros() - t_start;
+    pinMode(probe_a.pin_rh, INPUT);
+
+    if (t_elapsed < 220000UL) {
+        // Open socket stray flips in ~10 us
+        if (t_elapsed < 20) {
+            discharge_socket(15);
+            return false;
+        }
+        // Verify voltage hold after 600 us (real caps hold charge)
+        delayMicroseconds(600);
+        uint32_t adc_hold = adc_read_value(probe_a.adc_pin, 12);
+        if (adc_hold < 800) {
+            // Dropped significantly -> resistor/leaky
+            discharge_socket(20);
+            return false;
+        }
+
+        // C_pF = (t_us * 1000) / 470
+        uint32_t cap_pf = (t_elapsed * 1000UL) / 470UL;
+        if (cap_pf > 30) {
+            uint32_t cap_eff = (cap_pf > 25) ? (cap_pf - 25) : cap_pf; // Subtract baseline stray
+            strcpy(comp_res.type, "CAPACITOR");
+            if (cap_eff < 1000) {
+                snprintf(comp_res.value, sizeof(comp_res.value), "%lu pF", cap_eff);
+            } else {
+                uint32_t nf_x10 = (cap_eff + 50) / 100;
+                snprintf(comp_res.value, sizeof(comp_res.value), "%lu.%lu nF", nf_x10 / 10, nf_x10 % 10);
+            }
+            snprintf(comp_res.pinout, sizeof(comp_res.pinout), "Pins %d - %d", probe_a.idx, probe_b.idx);
+            rtt.printf(">> [COMPONENT DETECTED] CAPACITOR: %s (%s)\n", comp_res.value, comp_res.pinout);
+            discharge_socket(30);
+            return true;
+        }
+    }
+
+    // Phase 2: Large caps (> 0.5 uF .. 5000 uF) charged via RL (680R)
+    discharge_socket(80);
+    pinMode(probe_b.pin_rl, OUTPUT);
+    digitalWrite(probe_b.pin_rl, LOW);
+
+    GPIOA->MODER &= ~(3U << (p * 2));
+    GPIOA->PUPDR &= ~(3U << (p * 2));
+
+    pinMode(probe_a.pin_rl, OUTPUT);
+    digitalWrite(probe_a.pin_rl, HIGH);
+    t_start = micros();
+
+    while (!((GPIOA->IDR >> p) & 1U)) {
+        if ((micros() - t_start) > 3500000UL) break; // 3.5s timeout (~5000 uF)
+    }
+    t_elapsed = micros() - t_start;
+    pinMode(probe_a.pin_rl, INPUT);
+
+    if (t_elapsed > 200 && t_elapsed < 3500000UL) {
+        // C_nF = (t_us) / 680
+        uint32_t cap_nf = t_elapsed / 680UL;
+        if (cap_nf >= 100) {
+            strcpy(comp_res.type, "CAPACITOR");
+            if (cap_nf < 1000) {
+                snprintf(comp_res.value, sizeof(comp_res.value), "%lu nF", cap_nf);
+            } else {
+                uint32_t uf_x10 = (cap_nf + 50) / 100;
+                snprintf(comp_res.value, sizeof(comp_res.value), "%lu.%lu uF", uf_x10 / 10, uf_x10 % 10);
+            }
+            snprintf(comp_res.pinout, sizeof(comp_res.pinout), "Pins %d - %d", probe_a.idx, probe_b.idx);
+            rtt.printf(">> [COMPONENT DETECTED] CAPACITOR: %s (%s)\n", comp_res.value, comp_res.pinout);
+            discharge_socket(60);
+            return true;
+        }
+    }
+
+    discharge_socket(30);
+    return false;
 }
 
 static void run_component_test() {
-    rtt.println(">> [TESTER] Running full component measurement (Resistor, Diode, Capacitor)...");
+    rtt.println(">> [TESTER] Running full component test (BJT, MOSFET, Diode, Resistor, Capacitor)...");
     beep_square(3200, 30);
 
     uint32_t vcc = read_vcc_mv();
-    bool found = false;
 
     // Read resting voltages
     comp_res.s1_mv = (adc_read_value(PA_3, 12) * vcc) / 4095;
     comp_res.s2_mv = (adc_read_value(PA_4, 12) * vcc) / 4095;
     comp_res.s3_mv = (adc_read_value(PA_5, 12) * vcc) / 4095;
 
-    // Test Pair 1 - 2
-    test_pair(PIN_RL1, PIN_RH1, PA_3, 1, PIN_RL2, PIN_RH2, PA_4, 2, vcc, found);
+    // ------------------------------------------------------------------------
+    // STAGE 1: SCAN ALL 6 DIODE COMBINATIONS (Pairs 1-2, 2-3, 1-3 in both directions)
+    // ------------------------------------------------------------------------
+    DiodeDetection found_diodes[6];
+    uint8_t num_diodes = 0;
 
-    // Test Pair 2 - 3
-    test_pair(PIN_RL2, PIN_RH2, PA_4, 2, PIN_RL3, PIN_RH3, PA_5, 3, vcc, found);
-
-    // Test Pair 1 - 3
-    test_pair(PIN_RL1, PIN_RH1, PA_3, 1, PIN_RL3, PIN_RH3, PA_5, 3, vcc, found);
-
-    if (!found) {
-        strcpy(comp_res.type, "NONE");
-        strcpy(comp_res.value, "No component");
-        strcpy(comp_res.pinout, "Pins 1-2-3 Open");
-        rtt.println(">> [TESTER] Result: No component detected in 1-2-3 socket.");
+    for (uint8_t i = 0; i < 3; i++) {
+        for (uint8_t j = 0; j < 3; j++) {
+            if (i == j) continue;
+            uint16_t vf = probe_diode_direction(i, j, vcc);
+            if (vf > 0) {
+                found_diodes[num_diodes++] = {PROBES[i].idx, PROBES[j].idx, vf};
+            }
+        }
     }
 
+    // ------------------------------------------------------------------------
+    // STAGE 2: ANALYZE DIODE JUNCTIONS (NPN, PNP, DUAL DIODE, MOSFET, SINGLE DIODE)
+    // ------------------------------------------------------------------------
+    if (num_diodes == 2) {
+        // Case A: Common Anode -> NPN Transistor!
+        if (found_diodes[0].a == found_diodes[1].a) {
+            uint8_t base = found_diodes[0].a;
+            uint8_t em = (found_diodes[0].vf_mv >= found_diodes[1].vf_mv) ? found_diodes[0].k : found_diodes[1].k;
+            uint8_t col = (em == found_diodes[0].k) ? found_diodes[1].k : found_diodes[0].k;
+            uint32_t avg_vf = (found_diodes[0].vf_mv + found_diodes[1].vf_mv) / 2;
+
+            strcpy(comp_res.type, "NPN");
+            snprintf(comp_res.pinout, sizeof(comp_res.pinout), "B:%d C:%d E:%d", base, col, em);
+            snprintf(comp_res.value, sizeof(comp_res.value), "Vf=%lu.%02luV", avg_vf / 1000, (avg_vf % 1000) / 10);
+            rtt.printf(">> [COMPONENT DETECTED] NPN BJT: %s (%s)\n", comp_res.value, comp_res.pinout);
+            release_probes();
+            return;
+        }
+
+        // Case B: Common Cathode -> PNP Transistor!
+        if (found_diodes[0].k == found_diodes[1].k) {
+            uint8_t base = found_diodes[0].k;
+            uint8_t em = (found_diodes[0].vf_mv >= found_diodes[1].vf_mv) ? found_diodes[0].a : found_diodes[1].a;
+            uint8_t col = (em == found_diodes[0].a) ? found_diodes[1].a : found_diodes[0].a;
+            uint32_t avg_vf = (found_diodes[0].vf_mv + found_diodes[1].vf_mv) / 2;
+
+            strcpy(comp_res.type, "PNP");
+            snprintf(comp_res.pinout, sizeof(comp_res.pinout), "B:%d C:%d E:%d", base, col, em);
+            snprintf(comp_res.value, sizeof(comp_res.value), "Vf=%lu.%02luV", avg_vf / 1000, (avg_vf % 1000) / 10);
+            rtt.printf(">> [COMPONENT DETECTED] PNP BJT: %s (%s)\n", comp_res.value, comp_res.pinout);
+            release_probes();
+            return;
+        }
+
+        // Dual Diode (Common terminal or series)
+        strcpy(comp_res.type, "DIODE");
+        snprintf(comp_res.pinout, sizeof(comp_res.pinout), "%d->%d & %d->%d",
+                 found_diodes[0].a, found_diodes[0].k, found_diodes[1].a, found_diodes[1].k);
+        snprintf(comp_res.value, sizeof(comp_res.value), "Vf=%u,%umV", found_diodes[0].vf_mv, found_diodes[1].vf_mv);
+        rtt.printf(">> [COMPONENT DETECTED] DUAL DIODE: %s (%s)\n", comp_res.value, comp_res.pinout);
+        release_probes();
+        return;
+
+    } else if (num_diodes == 1) {
+        // Exactly 1 Diode found. Check if third pin acts as a MOSFET Gate!
+        uint8_t da = found_diodes[0].a;
+        uint8_t dk = found_diodes[0].k;
+        uint8_t gate = 6 - da - dk; // The remaining pin (1+2+3 = 6)
+        uint8_t g_idx = gate - 1;
+        uint8_t da_idx = da - 1;
+        uint8_t dk_idx = dk - 1;
+
+        // Test N-MOSFET (Body Diode: Source=da, Drain=dk, Gate=gate)
+        // 1. Discharge Gate to 0V
+        pinMode(PROBES[g_idx].pin_rl, OUTPUT);
+        digitalWrite(PROBES[g_idx].pin_rl, LOW);
+        delay(5);
+        pinMode(PROBES[g_idx].pin_rl, INPUT); // High-Z gate
+
+        // Measure baseline V_DS off
+        pinMode(PROBES[dk_idx].pin_rl, OUTPUT);
+        digitalWrite(PROBES[dk_idx].pin_rl, HIGH);
+        pinMode(PROBES[da_idx].pin_rl, OUTPUT);
+        digitalWrite(PROBES[da_idx].pin_rl, LOW);
+        delayMicroseconds(300);
+        uint32_t vs_off = (adc_read_value(PROBES[da_idx].adc_pin, 12) * vcc) / 4095;
+        release_probes();
+
+        // 2. Charge Gate to 3.3V
+        pinMode(PROBES[g_idx].pin_rh, OUTPUT);
+        digitalWrite(PROBES[g_idx].pin_rh, HIGH);
+        delay(8);
+        pinMode(PROBES[g_idx].pin_rh, INPUT); // Keep Gate charged
+
+        // Measure V_DS on
+        pinMode(PROBES[dk_idx].pin_rl, OUTPUT);
+        digitalWrite(PROBES[dk_idx].pin_rl, HIGH);
+        pinMode(PROBES[da_idx].pin_rl, OUTPUT);
+        digitalWrite(PROBES[da_idx].pin_rl, LOW);
+        delayMicroseconds(300);
+        uint32_t vs_on = (adc_read_value(PROBES[da_idx].adc_pin, 12) * vcc) / 4095;
+        release_probes();
+
+        // If Gate charge increased Source conduction (vs_on > vs_off + 250 mV):
+        if (vs_on > vs_off + 250) {
+            // Discharge gate to confirm it turns off
+            pinMode(PROBES[g_idx].pin_rl, OUTPUT);
+            digitalWrite(PROBES[g_idx].pin_rl, LOW);
+            delay(5);
+            release_probes();
+
+            strcpy(comp_res.type, "N-MOS");
+            snprintf(comp_res.pinout, sizeof(comp_res.pinout), "G:%d D:%d S:%d", gate, dk, da);
+            snprintf(comp_res.value, sizeof(comp_res.value), "Vf=%lu.%02luV", 
+                     (uint32_t)found_diodes[0].vf_mv / 1000, ((uint32_t)found_diodes[0].vf_mv % 1000) / 10);
+            rtt.printf(">> [COMPONENT DETECTED] N-CH MOSFET: %s (%s)\n", comp_res.value, comp_res.pinout);
+            return;
+        }
+
+        // Test P-MOSFET (Body Diode: Drain=da, Source=dk, Gate=gate)
+        // Charge gate HIGH -> off, pull gate LOW -> on
+        pinMode(PROBES[g_idx].pin_rh, OUTPUT);
+        digitalWrite(PROBES[g_idx].pin_rh, HIGH);
+        delay(8);
+        pinMode(PROBES[g_idx].pin_rh, INPUT);
+
+        pinMode(PROBES[da_idx].pin_rl, OUTPUT);
+        digitalWrite(PROBES[da_idx].pin_rl, HIGH);
+        pinMode(PROBES[dk_idx].pin_rl, OUTPUT);
+        digitalWrite(PROBES[dk_idx].pin_rl, LOW);
+        delayMicroseconds(300);
+        uint32_t vk_off = (adc_read_value(PROBES[dk_idx].adc_pin, 12) * vcc) / 4095;
+        release_probes();
+
+        // Pull gate to 0V
+        pinMode(PROBES[g_idx].pin_rl, OUTPUT);
+        digitalWrite(PROBES[g_idx].pin_rl, LOW);
+        delay(5);
+        pinMode(PROBES[g_idx].pin_rl, INPUT);
+
+        pinMode(PROBES[da_idx].pin_rl, OUTPUT);
+        digitalWrite(PROBES[da_idx].pin_rl, HIGH);
+        pinMode(PROBES[dk_idx].pin_rl, OUTPUT);
+        digitalWrite(PROBES[dk_idx].pin_rl, LOW);
+        delayMicroseconds(300);
+        uint32_t vk_on = (adc_read_value(PROBES[dk_idx].adc_pin, 12) * vcc) / 4095;
+        release_probes();
+
+        if (vk_on > vk_off + 250) {
+            strcpy(comp_res.type, "P-MOS");
+            snprintf(comp_res.pinout, sizeof(comp_res.pinout), "G:%d D:%d S:%d", gate, da, dk);
+            snprintf(comp_res.value, sizeof(comp_res.value), "Vf=%lu.%02luV", 
+                     (uint32_t)found_diodes[0].vf_mv / 1000, ((uint32_t)found_diodes[0].vf_mv % 1000) / 10);
+            rtt.printf(">> [COMPONENT DETECTED] P-CH MOSFET: %s (%s)\n", comp_res.value, comp_res.pinout);
+            return;
+        }
+
+        // Pure Single Diode
+        strcpy(comp_res.type, "DIODE");
+        snprintf(comp_res.pinout, sizeof(comp_res.pinout), "%d(A) -> %d(K)", da, dk);
+        snprintf(comp_res.value, sizeof(comp_res.value), "Vf=%lu.%02luV", 
+                 (uint32_t)found_diodes[0].vf_mv / 1000, ((uint32_t)found_diodes[0].vf_mv % 1000) / 10);
+        rtt.printf(">> [COMPONENT DETECTED] DIODE: %s (%s)\n", comp_res.value, comp_res.pinout);
+        release_probes();
+        return;
+    }
+
+    // ------------------------------------------------------------------------
+    // STAGE 3: TEST RESISTORS & CAPACITORS ACROSS ALL 3 PAIRS (1-2, 2-3, 1-3)
+    // ------------------------------------------------------------------------
+    static const uint8_t PAIRS[3][2] = {{0, 1}, {1, 2}, {0, 2}};
+
+    // Test for Resistors first
+    for (uint8_t p = 0; p < 3; p++) {
+        if (test_resistor(PAIRS[p][0], PAIRS[p][1], vcc)) {
+            release_probes();
+            return;
+        }
+    }
+
+    // Test for Capacitors
+    for (uint8_t p = 0; p < 3; p++) {
+        if (test_capacitance(PAIRS[p][0], PAIRS[p][1], vcc)) {
+            release_probes();
+            return;
+        }
+    }
+
+    // No component found
+    strcpy(comp_res.type, "NONE");
+    strcpy(comp_res.value, "No component");
+    strcpy(comp_res.pinout, "Pins 1-2-3 Open");
+    rtt.println(">> [TESTER] Result: No component detected in 1-2-3 socket.");
     release_probes();
 }
 
@@ -643,8 +825,13 @@ void setup() {
 #if defined(USART1)
     SerialUART1.setRx(PA10);
     SerialUART1.setTx(PA9);
-    SerialUART1.begin(115200);
+    SerialUART1.begin(38400);
 #endif
+
+    // Also initialize Serial on PA2 (USART2_TX, half-duplex so PA3 is untouched for Socket 1 ADC)
+    Serial.setTx(PA2);
+    Serial.setRx(NC);
+    Serial.begin(38400);
 
     rtt.println("\n\n========================================================");
     rtt.println("   FNIRSI DSO-TC2 COMPLETE HARDWARE ENGINE ONLINE       ");
@@ -680,6 +867,7 @@ void loop() {
 #if defined(USART1)
         SerialUART1.print(ir_pkt);
 #endif
+        Serial.print(ir_pkt);
     }
     bool ir_active = (millis() - ir_data.last_rx_ms < 400) || (micros() - ir_last_edge_us < 350000UL);
 
@@ -813,5 +1001,6 @@ void loop() {
 #if defined(USART1)
         SerialUART1.print(buf);
 #endif
+        Serial.print(buf);
     }
 }

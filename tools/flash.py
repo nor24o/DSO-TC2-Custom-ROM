@@ -64,12 +64,12 @@ def flash_tester():
         sys.exit(1)
         
     script_path = os.path.join(PROJ_DIR, "tools", "temp_flash_l083.jlink")
-    script_content = f"""RSetType 0
+    script_content = f"""RSetType 1
 h
 loadbin {bin_path.replace(os.sep, '/')}, 0x08000000
 r
 g
-q
+Exit
 """
     with open(script_path, "w") as f:
         f.write(script_content)
@@ -79,7 +79,7 @@ q
         "-SelectEmuBySN", "69650043",
         "-device", "STM32L083RZ",
         "-if", "SWD",
-        "-speed", "500",
+        "-speed", "2000",
         "-autoconnect", "1",
         "-NoGui", "1",
         "-CommanderScript", script_path

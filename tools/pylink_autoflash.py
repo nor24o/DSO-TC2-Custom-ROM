@@ -20,6 +20,16 @@ def on_progress(action, progress_string, percentage):
 
 def main():
     sys.stdout.reconfigure(line_buffering=True)
+
+    print("=" * 60)
+    print("   COMPILING FRESH FIRMWARE FOR TESTER & DISPLAY")
+    print("=" * 60)
+    import subprocess
+    res = subprocess.run(["pio", "run", "-e", "tester_l083"], cwd=PROJ_DIR)
+    if res.returncode != 0:
+        print("[-] Error: tester_l083 build failed!")
+        sys.exit(1)
+
     if not os.path.exists(BIN_PATH):
         print(f"[-] Error: binary not found at {BIN_PATH}")
         sys.exit(1)

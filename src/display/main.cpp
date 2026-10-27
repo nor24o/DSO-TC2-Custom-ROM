@@ -70,6 +70,7 @@ static bool need_full_redraw = true;
 static char rx_buf[160];
 static uint8_t rx_idx = 0;
 static uint32_t last_rx_time = 0;
+static uint32_t raw_rx_bytes = 0;
 
 static void parse_packet(const char* pkt) {
     if (strncmp(pkt, "#IR:", 4) == 0) {
@@ -146,6 +147,7 @@ static void parse_packet(const char* pkt) {
 static void poll_uart() {
     while (Serial1.available()) {
         char c = (char)Serial1.read();
+        raw_rx_bytes++;
         if (c == '#') {
             rx_idx = 0;
             rx_buf[rx_idx++] = c;
@@ -198,12 +200,18 @@ static void draw_schematic_graphic(const char* type, const char* pinout) {
     // 1. Left Schematic Canvas: X: 10..220, Y: 30..76 (Center Y = 53)
     tft_fill_rect(10, 30, 210, 46, COLOR_BLACK);
 
-    // Extract terminal indices from pinout string (e.g. "Pins 1 - 2", "1(A) -> 2(K)")
-    char pA = '1', pB = '2';
-    if (strstr(pinout, "2 - 3") || strstr(pinout, "2(A) -> 3(K)") || strstr(pinout, "3(A) -> 2(K)")) {
-        pA = '2'; pB = '3';
-    } else if (strstr(pinout, "1 - 3") || strstr(pinout, "1(A) -> 3(K)") || strstr(pinout, "3(A) -> 1(K)")) {
-        pA = '1'; pB = '3';
+    // Extract terminal indices dynamically from pinout string (e.g. "Pins 1 - 2", "3(A) -> 2(K)", "B:1 C:2 E:3")
+    char pA = '1', pB = '2', pC = '0';
+    const char* ptr = pinout;
+    while (*ptr && (*ptr < '1' || *ptr > '3')) ptr++;
+    if (*ptr) {
+        pA = *ptr++;
+        while (*ptr && (*ptr < '1' || *ptr > '3')) ptr++;
+        if (*ptr) {
+            pB = *ptr++;
+            while (*ptr && (*ptr < '1' || *ptr > '3')) ptr++;
+            if (*ptr) pC = *ptr;
+        }
     }
 
     bool is_open = (strcmp(type, "NONE") == 0 || strlen(type) == 0);
@@ -264,34 +272,100 @@ static void draw_schematic_graphic(const char* type, const char* pinout) {
         tft_draw_char(192, 46, pB, COLOR_CYAN, COLOR_NAVY, 1);
 
     } else if (strcmp(type, "DIODE") == 0) {
-        // Anode Terminal Badge
+        // Anode Terminal Badge (pA on Left)
         tft_fill_rect(14, 42, 20, 22, COLOR_NAVY);
         tft_draw_rect(14, 42, 20, 22, COLOR_GREEN);
         tft_draw_char(20, 46, pA, COLOR_GREEN, COLOR_NAVY, 1);
+        tft_print(16, 32, "A", COLOR_GREEN, COLOR_BLACK, 1);
 
         // Anode Lead
         tft_draw_hline(34, 53, 58, COLOR_WHITE);
 
-        // Diode Triangle (Anode pointing right towards cathode)
+        // Standard Electronic Diode Symbol:
+        // Flat Base on Left at X=92, Pointing Right to tip at X=110 touching Cathode Bar at X=111
         for (int i = 0; i <= 18; i++) {
-            int16_t h = (i * 20) / 18;
+            int16_t h = 20 - (i * 20) / 18;
             tft_draw_vline(92 + i, 53 - h / 2, h, COLOR_GREEN);
         }
 
-        // Cathode Vertical Bar
-        tft_fill_rect(112, 41, 4, 24, COLOR_GREEN);
+        // Cathode Vertical Bar (X: 111..114)
+        tft_fill_rect(111, 41, 4, 24, COLOR_GREEN);
 
         // LED Emission Rays
+        tft_draw_line(100, 37, 110, 27, COLOR_YELLOW);
         tft_draw_line(106, 37, 116, 27, COLOR_YELLOW);
-        tft_draw_line(112, 37, 122, 27, COLOR_YELLOW);
 
         // Cathode Lead
-        tft_draw_hline(116, 53, 70, COLOR_WHITE);
+        tft_draw_hline(115, 53, 71, COLOR_WHITE);
 
-        // Cathode Terminal Badge
+        // Cathode Terminal Badge (pB on Right)
         tft_fill_rect(186, 42, 20, 22, COLOR_NAVY);
         tft_draw_rect(186, 42, 20, 22, COLOR_GREEN);
         tft_draw_char(192, 46, pB, COLOR_GREEN, COLOR_NAVY, 1);
+        tft_print(192, 32, "K", COLOR_GREEN, COLOR_BLACK, 1);
+
+    } else if (strcmp(type, "NPN") == 0 || strcmp(type, "PNP") == 0) {
+        bool is_npn = (strcmp(type, "NPN") == 0);
+        // Base Terminal Badge (Left: X=14, Y=42)
+        tft_fill_rect(14, 42, 20, 22, COLOR_NAVY);
+        tft_draw_rect(14, 42, 20, 22, COLOR_YELLOW);
+        tft_draw_char(20, 46, pA, COLOR_YELLOW, COLOR_NAVY, 1);
+        tft_print(16, 32, "B", COLOR_YELLOW, COLOR_BLACK, 1);
+
+        // Base lead & vertical bar
+        tft_draw_hline(34, 53, 50, COLOR_WHITE);
+        tft_fill_rect(84, 38, 4, 30, COLOR_WHITE);
+
+        // Collector (top right)
+        tft_draw_line(88, 44, 114, 35, COLOR_WHITE);
+        tft_draw_hline(114, 35, 72, COLOR_WHITE);
+        tft_fill_rect(186, 26, 20, 20, COLOR_NAVY);
+        tft_draw_rect(186, 26, 20, 20, COLOR_CYAN);
+        tft_draw_char(192, 30, pB, COLOR_CYAN, COLOR_NAVY, 1);
+        tft_print(192, 16, "C", COLOR_CYAN, COLOR_BLACK, 1);
+
+        // Emitter (bottom right)
+        tft_draw_line(88, 62, 114, 71, COLOR_WHITE);
+        tft_draw_hline(114, 71, 72, COLOR_WHITE);
+        tft_fill_rect(186, 60, 20, 20, COLOR_NAVY);
+        tft_draw_rect(186, 60, 20, 20, COLOR_GREEN);
+        tft_draw_char(192, 64, pC, COLOR_GREEN, COLOR_NAVY, 1);
+        tft_print(192, 82, "E", COLOR_GREEN, COLOR_BLACK, 1);
+
+        tft_print(122, 50, is_npn ? "NPN" : "PNP", is_npn ? COLOR_GREEN : COLOR_YELLOW, COLOR_BLACK, 1);
+
+    } else if (strcmp(type, "N-MOS") == 0 || strcmp(type, "P-MOS") == 0) {
+        bool is_n = (strcmp(type, "N-MOS") == 0);
+        // Gate Badge (Left: X=14, Y=42)
+        tft_fill_rect(14, 42, 20, 22, COLOR_NAVY);
+        tft_draw_rect(14, 42, 20, 22, COLOR_YELLOW);
+        tft_draw_char(20, 46, pA, COLOR_YELLOW, COLOR_NAVY, 1);
+        tft_print(16, 32, "G", COLOR_YELLOW, COLOR_BLACK, 1);
+
+        // Gate lead & insulated bar
+        tft_draw_hline(34, 53, 44, COLOR_WHITE);
+        tft_fill_rect(78, 38, 3, 30, COLOR_YELLOW);
+
+        // Channel segments
+        tft_fill_rect(84, 38, 4, 8, COLOR_WHITE);
+        tft_fill_rect(84, 49, 4, 8, COLOR_WHITE);
+        tft_fill_rect(84, 60, 4, 8, COLOR_WHITE);
+
+        // Drain (top right)
+        tft_draw_hline(88, 42, 98, COLOR_WHITE);
+        tft_fill_rect(186, 26, 20, 20, COLOR_NAVY);
+        tft_draw_rect(186, 26, 20, 20, COLOR_CYAN);
+        tft_draw_char(192, 30, pB, COLOR_CYAN, COLOR_NAVY, 1);
+        tft_print(192, 16, "D", COLOR_CYAN, COLOR_BLACK, 1);
+
+        // Source (bottom right)
+        tft_draw_hline(88, 64, 98, COLOR_WHITE);
+        tft_fill_rect(186, 60, 20, 20, COLOR_NAVY);
+        tft_draw_rect(186, 60, 20, 20, COLOR_GREEN);
+        tft_draw_char(192, 60, pC, COLOR_GREEN, COLOR_NAVY, 1);
+        tft_print(192, 82, "S", COLOR_GREEN, COLOR_BLACK, 1);
+
+        tft_print(112, 50, is_n ? "N-MOS" : "P-MOS", is_n ? COLOR_GREEN : COLOR_YELLOW, COLOR_BLACK, 1);
 
     } else if (strcmp(type, "SHORT") == 0) {
         // Left Badge
@@ -322,9 +396,9 @@ static void draw_schematic_graphic(const char* type, const char* pinout) {
     tft_fill_rect(227, 34, 9, 94, 0x001F);  // Blue locking lever
 
     // 3 Pin Holes
-    bool s1_act = !is_open && (pA == '1' || pB == '1');
-    bool s2_act = !is_open && (pA == '2' || pB == '2');
-    bool s3_act = !is_open && (pA == '3' || pB == '3');
+    bool s1_act = !is_open && (pA == '1' || pB == '1' || pC == '1');
+    bool s2_act = !is_open && (pA == '2' || pB == '2' || pC == '2');
+    bool s3_act = !is_open && (pA == '3' || pB == '3' || pC == '3');
 
     tft_fill_rect(242, 36, 62, 26, s1_act ? COLOR_GREEN : COLOR_BLACK);
     tft_draw_rect(242, 36, 62, 26, s1_act ? COLOR_WHITE : COLOR_DARKGREY);
@@ -390,7 +464,9 @@ static void draw_screen_background() {
 
 void setup() {
     tft_init();
-    Serial1.begin(115200);
+    Serial1.setRx(PA10);
+    Serial1.setTx(PA9);
+    Serial1.begin(38400);
     draw_screen_background();
 }
 
@@ -466,11 +542,13 @@ void loop() {
             tft_print(10, 192, buf, COLOR_WHITE, COLOR_BLACK, 1);
 
             if (l083_data.connected) {
-                snprintf(buf, sizeof(buf), "VCC:%0.2fV | L083:ONLINE (%2uHz)     ",
-                         l083_data.vcc_mv / 1000.0f, 20);
+                snprintf(buf, sizeof(buf), "VCC:%0.2fV | L083:ONLINE (%lu pkts)  ",
+                         l083_data.vcc_mv / 1000.0f, l083_data.total_packets);
                 tft_print(10, 208, buf, 0x07E0, COLOR_BLACK, 1);
             } else {
-                tft_print(10, 208, "L083 STATUS: OFFLINE (Check UART)", COLOR_RED, COLOR_BLACK, 1);
+                snprintf(buf, sizeof(buf), "L083 OFFLINE (RX:%lu B, Pkt:%lu) ",
+                         raw_rx_bytes, l083_data.total_packets);
+                tft_print(10, 208, buf, COLOR_RED, COLOR_BLACK, 1);
             }
 
             tft_print(10, 222, "Press MENU to switch to Tester  ", COLOR_LIGHTGREY, COLOR_BLACK, 1);
@@ -534,88 +612,108 @@ void loop() {
             tft_print(12, 198, "Sense: PA3(1), PA4(2), PA5(3)     ", COLOR_CYAN, COLOR_BLACK, 1);
             tft_print(12, 212, "TEST=Measure | MENU=Switch IR Dec ", 0x07E0, COLOR_BLACK, 1);
 
-            snprintf(buf, sizeof(buf), "VCC: %0.2fV | L083: ONLINE (20 Hz)   ",
-                     l083_data.vcc_mv / 1000.0f);
-            tft_print(12, 224, buf, COLOR_WHITE, COLOR_BLACK, 1);
+            if (l083_data.connected) {
+                snprintf(buf, sizeof(buf), "VCC:%0.2fV | LINK:OK (%lu pkts)   ",
+                         l083_data.vcc_mv / 1000.0f, l083_data.total_packets);
+                tft_print(12, 224, buf, COLOR_GREEN, COLOR_BLACK, 1);
+            } else {
+                snprintf(buf, sizeof(buf), "LINK:WAITING (RX:%lu B, Pkt:%lu)  ",
+                         raw_rx_bytes, l083_data.total_packets);
+                tft_print(12, 224, buf, COLOR_RED, COLOR_BLACK, 1);
+            }
             poll_uart();
 
         } else {
             // ================================================================
             // SCREEN 2: DEDICATED INFRARED REMOTE DECODER
             // ================================================================
+            static bool prev_received = false;
+            static uint8_t prev_hist_cnt = 255;
+
             // Clear test log if TEST pressed without holding MENU
             if (b_test && !b_menu) {
                 ir_rx.received = false;
                 ir_rx.hist_cnt = 0;
+                ir_rx.raw_code = 0;
+            }
+
+            // Cleanly clear Card 1 on state change or full redraw
+            if (ir_rx.received != prev_received || need_full_redraw) {
+                tft_fill_rect(5, 27, 310, 108, COLOR_BLACK);
+                prev_received = ir_rx.received;
             }
 
             // Card 1: Decoder Dashboard (Y: 26..136)
             if (!ir_rx.received) {
                 tft_print(16, 36, "[ WAITING FOR IR REMOTE... ]    ", COLOR_YELLOW, COLOR_BLACK, 1);
-                tft_print(16, 54, "Point remote at front sensor on PB9 ", COLOR_WHITE, COLOR_BLACK, 1);
-                tft_print(16, 72, "Supported: NEC / 38 kHz Remotes     ", COLOR_CYAN, COLOR_BLACK, 1);
-                tft_print(16, 90, "Press any button on remote to test  ", COLOR_LIGHTGREY, COLOR_BLACK, 1);
-                tft_print(16, 110, "Demodulator: Listening on Pin PB9   ", 0x07E0, COLOR_BLACK, 1);
+                tft_print(16, 54, "Point remote at front sensor PB9", COLOR_WHITE, COLOR_BLACK, 1);
+                tft_print(16, 72, "Supported: NEC / Samsung / Sony ", COLOR_CYAN, COLOR_BLACK, 1);
+                tft_print(16, 90, "Press any button on remote...   ", COLOR_LIGHTGREY, COLOR_BLACK, 1);
+                tft_print(16, 110, "Sensor: PB9 Demodulator (Active)", 0x07E0, COLOR_BLACK, 1);
             } else {
-                bool is_recent = (millis() - ir_rx.last_rx_ms < 500);
+                bool is_recent = (millis() - ir_rx.last_rx_ms < 600);
                 if (is_recent) {
-                    tft_print(16, 32, ">> IR FRAME DECODED SUCCESSFULLY! <<", COLOR_GREEN, COLOR_BLACK, 1);
+                    tft_print(16, 30, ">> IR FRAME DECODED! <<         ", COLOR_GREEN, COLOR_BLACK, 1);
                 } else {
-                    tft_print(16, 32, "-- LAST DECODED IR REMOTE SIGNAL -- ", COLOR_LIGHTGREY, COLOR_BLACK, 1);
+                    tft_print(16, 30, "-- LAST RECEIVED IR CODE --     ", COLOR_LIGHTGREY, COLOR_BLACK, 1);
                 }
 
-                // Big Command & Address
-                snprintf(buf, sizeof(buf), "CMD: 0x%02X", ir_rx.command);
-                tft_print(16, 48, buf, COLOR_YELLOW, COLOR_BLACK, 2);
+                // Line 2: Large Command (Y: 44, Size 2)
+                snprintf(buf, sizeof(buf), "CMD:  0x%02X (%3u)", ir_rx.command, ir_rx.command);
+                tft_print(16, 44, buf, COLOR_YELLOW, COLOR_BLACK, 2);
 
-                snprintf(buf, sizeof(buf), "ADDR:0x%04X", ir_rx.address);
-                tft_print(168, 48, buf, COLOR_CYAN, COLOR_BLACK, 2);
+                // Line 3: Address & Protocol (Y: 66, Size 1)
+                snprintf(buf, sizeof(buf), "ADDR: 0x%04X | Proto: %-5s", ir_rx.address, ir_rx.protocol);
+                tft_print(16, 66, buf, COLOR_CYAN, COLOR_BLACK, 1);
 
-                // Protocol & Repeats
-                snprintf(buf, sizeof(buf), "Proto: %-4s | Repeats: %-3lu (Held) ", 
-                         ir_rx.protocol, ir_rx.repeats);
-                tft_print(16, 74, buf, COLOR_WHITE, COLOR_BLACK, 1);
+                // Line 4: Raw 32-bit Code & Repeats (Y: 82, Size 1)
+                snprintf(buf, sizeof(buf), "RAW:  0x%08lX | Rpt: %-3lu", ir_rx.raw_code, ir_rx.repeats);
+                tft_print(16, 82, buf, COLOR_WHITE, COLOR_BLACK, 1);
 
-                // Raw 32-bit hex
-                snprintf(buf, sizeof(buf), "Raw 32-bit: 0x%08lX             ", ir_rx.raw_code);
-                tft_print(16, 90, buf, COLOR_YELLOW, COLOR_BLACK, 1);
-
-                // 32-Bit Visual Pulse Bar
-                tft_print(16, 106, "Bit Stream:", COLOR_LIGHTGREY, COLOR_BLACK, 1);
+                // Line 5: 32-Bit Visual Pulse Bar (Y: 98, Size 1)
+                tft_print(16, 98, "Bits: [MSB]", COLOR_DARKGREY, COLOR_BLACK, 1);
+                tft_print(250, 98, "[LSB]", COLOR_DARKGREY, COLOR_BLACK, 1);
                 for (int b = 0; b < 32; b++) {
-                    bool bit_val = (ir_rx.raw_code & (1UL << b)) != 0;
+                    bool bit_val = (ir_rx.raw_code & (1UL << (31 - b))) != 0;
                     uint16_t b_col = bit_val ? COLOR_GREEN : 0x001F;
-                    tft_fill_rect(106 + b * 6, 107, 5, 8, b_col);
+                    tft_fill_rect(16 + b * 7, 108, 6, 8, b_col);
                 }
 
                 uint32_t ago = (millis() - ir_rx.last_rx_ms) / 1000;
-                snprintf(buf, sizeof(buf), "Elapsed: %lu sec ago (%s)        ", 
+                snprintf(buf, sizeof(buf), "Rx: %lu sec ago (%s)            ",
                          ago, (ago < 1) ? "ACTIVE" : "IDLE");
                 tft_print(16, 120, buf, (ago < 1) ? COLOR_GREEN : COLOR_LIGHTGREY, COLOR_BLACK, 1);
             }
 
             // Card 2: History Log (Y: 138..236)
-            tft_print(12, 144, "DECODED IR HISTORY (Recent Keys):", COLOR_CYAN, COLOR_BLACK, 1);
+            if (ir_rx.hist_cnt != prev_hist_cnt || need_full_redraw) {
+                tft_fill_rect(5, 154, 310, 56, COLOR_BLACK);
+                prev_hist_cnt = ir_rx.hist_cnt;
+            }
+
+            tft_print(12, 142, "DECODED IR HISTORY (Recent Keys):", COLOR_CYAN, COLOR_BLACK, 1);
 
             if (ir_rx.hist_cnt == 0) {
-                tft_print(12, 162, "No recent codes in buffer.        ", COLOR_DARKGREY, COLOR_BLACK, 1);
-                tft_print(12, 178, "Codes appear here as remote sends.", COLOR_DARKGREY, COLOR_BLACK, 1);
-                tft_print(12, 194, "Press TEST to clear history buffer", COLOR_DARKGREY, COLOR_BLACK, 1);
+                tft_print(16, 160, "No recent codes in buffer.      ", COLOR_DARKGREY, COLOR_BLACK, 1);
+                tft_print(16, 176, "Point remote & press button.    ", COLOR_DARKGREY, COLOR_BLACK, 1);
             } else {
                 for (int h = 0; h < 3; h++) {
-                    int16_t hy = 162 + (h * 16);
+                    int16_t hy = 158 + (h * 16);
                     if (h < ir_rx.hist_cnt) {
-                        snprintf(buf, sizeof(buf), "#%d: Addr:0x%04X Cmd:0x%02X Raw:%08lX", 
-                                 h + 1, ir_rx.hist_addr[h], ir_rx.hist_cmd[h], ir_rx.hist_raw[h]);
-                        tft_print(12, hy, buf, (h == 0) ? COLOR_YELLOW : COLOR_WHITE, COLOR_BLACK, 1);
-                    } else {
-                        tft_print(12, hy, "                                  ", COLOR_BLACK, COLOR_BLACK, 1);
+                        snprintf(buf, sizeof(buf), "#%d: Cmd:0x%02X Addr:0x%04X Raw:%08lX",
+                                 h + 1, ir_rx.hist_cmd[h], ir_rx.hist_addr[h], ir_rx.hist_raw[h]);
+                        tft_print(16, hy, buf, (h == 0) ? COLOR_YELLOW : COLOR_WHITE, COLOR_BLACK, 1);
                     }
                 }
             }
 
             tft_print(12, 212, "Sensor: PB9 Demodulator (Active-L)", COLOR_LIGHTGREY, COLOR_BLACK, 1);
-            tft_print(12, 224, "MENU=Next Screen | TEST=Clear Log ", 0x07E0, COLOR_BLACK, 1);
+            if (l083_data.connected) {
+                tft_print(12, 224, "MENU=Next | TEST=Clear | LINK:OK ", 0x07E0, COLOR_BLACK, 1);
+            } else {
+                snprintf(buf, sizeof(buf), "MENU=Next | LINK:OFFLINE (RX:%luB)", raw_rx_bytes);
+                tft_print(12, 224, buf, COLOR_RED, COLOR_BLACK, 1);
+            }
             poll_uart();
         }
     }
