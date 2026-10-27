@@ -1295,7 +1295,46 @@ void setup() {
     rtt.println("========================================================\n");
 }
 
+// ============================================================================
+// INDUSTRIAL-GRADE BUTTON DEBOUNCER (40 ms integrator / contact-chatter lockout)
+// ============================================================================
+struct ButtonDebouncer {
+    bool raw_state;
+    bool stable_state;
+    bool pressed;   // One-shot edge on stable press
+    bool released;  // One-shot edge on stable release
+    uint32_t last_transition_ms;
+
+    void update(bool raw, uint32_t now) {
+        pressed = false;
+        released = false;
+        if (raw != raw_state) {
+            raw_state = raw;
+            last_transition_ms = now;
+        }
+        if ((now - last_transition_ms) >= 40) { // 40 ms debounce window
+            if (raw_state != stable_state) {
+                stable_state = raw_state;
+                if (stable_state) {
+                    pressed = true;
+                } else {
+                    released = true;
+                }
+            }
+        }
+    }
+};
+
+static ButtonDebouncer btn_up_db;
+static ButtonDebouncer btn_down_db;
+static ButtonDebouncer btn_ok_db;
+static ButtonDebouncer btn_test_db;
+static ButtonDebouncer btn_menu_db;
+static ButtonDebouncer btn_pwr_db;
+
 void loop() {
+    uint32_t now_ms = millis();
+
     // Process background IR demodulator pulse train from PB9
     process_ir();
 
@@ -1303,12 +1342,31 @@ void loop() {
     uint16_t rb = (uint16_t)GPIOB->IDR;
     uint16_t rc = (uint16_t)GPIOC->IDR;
 
-    bool b_up    = !(rc & (1U << 8));   // PC8
-    bool b_down  = !(rc & (1U << 9));   // PC9
-    bool b_ok    = !(rb & (1U << 14));  // PB14: OK / ENTER (<)
-    bool b_test  = !(ra & (1U << 8));   // PA8:  TEST / HOLD (>)
-    bool b_menu  = !(rb & (1U << 15));  // PB15: MENU / AUTO
-    bool b_pwr   = !(rb & (1U << 13));  // PB13: POWER
+    bool raw_up    = !(rc & (1U << 8));   // PC8
+    bool raw_down  = !(rc & (1U << 9));   // PC9
+    bool raw_ok    = !(rb & (1U << 14));  // PB14: OK / ENTER (<)
+    bool raw_test  = !(ra & (1U << 8));   // PA8:  TEST / HOLD (>)
+    bool raw_menu  = !(rb & (1U << 15));  // PB15: MENU / AUTO
+    bool raw_pwr   = !(rb & (1U << 13));  // PB13: POWER
+
+    btn_up_db.update(raw_up, now_ms);
+    btn_down_db.update(raw_down, now_ms);
+    btn_ok_db.update(raw_ok, now_ms);
+    btn_test_db.update(raw_test, now_ms);
+    btn_menu_db.update(raw_menu, now_ms);
+    btn_pwr_db.update(raw_pwr, now_ms);
+
+    bool b_up    = btn_up_db.stable_state;
+    bool b_down  = btn_down_db.stable_state;
+    bool b_ok    = btn_ok_db.stable_state;
+    bool b_test  = btn_test_db.stable_state;
+    bool b_menu  = btn_menu_db.stable_state;
+    bool b_pwr   = btn_pwr_db.stable_state;
+
+    bool test_pressed = btn_test_db.pressed;
+    bool up_pressed   = btn_up_db.pressed;
+    bool down_pressed = btn_down_db.pressed;
+    bool menu_pressed = btn_menu_db.pressed;
 
     // IR Receiver on PB9 & Decoded Command Handler
     if (ir_data.has_new) {
@@ -1329,8 +1387,8 @@ void loop() {
 
     // Relay Toggle: Hold MENU and press TEST (PA8)
     static uint32_t last_relay_toggle = 0;
-    if (b_menu && b_test && (millis() - last_relay_toggle > 400)) {
-        last_relay_toggle = millis();
+    if (b_menu && test_pressed && (now_ms - last_relay_toggle > 400)) {
+        last_relay_toggle = now_ms;
         relay_state = !relay_state;
         digitalWrite(PIN_RELAY, relay_state ? HIGH : LOW);
         beep_square(relay_state ? 4000 : 1600, 30);
@@ -1339,42 +1397,29 @@ void loop() {
 
     // Backlight Brightness: Hold MENU and press UP/DOWN
     static uint32_t last_bl_change = 0;
-    if (b_menu && (millis() - last_bl_change > 150)) {
-        if (b_up && backlight_level < 255) {
+    if (b_menu && (now_ms - last_bl_change > 150)) {
+        if (up_pressed && backlight_level < 255) {
             backlight_level = (backlight_level > 230) ? 255 : (backlight_level + 25);
             analogWrite(PIN_BACKLIGHT, backlight_level);
-            last_bl_change = millis();
+            last_bl_change = now_ms;
             beep_square(3600, 15);
-        } else if (b_down && backlight_level > 30) {
+        } else if (down_pressed && backlight_level > 30) {
             backlight_level = (backlight_level < 55) ? 30 : (backlight_level - 25);
             analogWrite(PIN_BACKLIGHT, backlight_level);
-            last_bl_change = millis();
+            last_bl_change = now_ms;
             beep_square(1800, 15);
         }
     }
 
     // Menu navigation: Switch instruments (0 = Tester, 1 = IR Decoder, 2 = Zener, 3 = SigGen & Voltmeter)
-    static bool prev_b_menu = false;
-    bool menu_pressed = b_menu && !prev_b_menu;
-    prev_b_menu = b_menu;
-
-    if (menu_pressed) {
+    // Only trigger if MENU alone was pressed (not held as a modifier for relay or backlight)
+    if (menu_pressed && !b_test && !b_up && !b_down) {
         instrument_mode = (instrument_mode + 1) % 4;
         beep_square(3200, 20);
         rtt.printf(">> [INSTRUMENT SWITCH] Mode: %u\n", instrument_mode);
     }
 
     // Instrument-specific actions for TEST, UP, DOWN
-    static bool prev_b_test = false;
-    static bool prev_b_up = false;
-    static bool prev_b_down = false;
-    bool test_pressed = b_test && !prev_b_test;
-    bool up_pressed   = b_up   && !prev_b_up;
-    bool down_pressed = b_down && !prev_b_down;
-    prev_b_test = b_test;
-    prev_b_up   = b_up;
-    prev_b_down = b_down;
-
     if (!b_menu) {
         if (instrument_mode == 0) { // TESTER
             if (test_pressed) {
@@ -1486,22 +1531,17 @@ void loop() {
     else if (b_menu)      { active_btn = "MENU";  active_pin = "PB15"; }
     else if (ir_active)   { active_btn = "IR_RX"; active_pin = "PB9";  }
 
-    // Key click audio & instant event flag
-    static uint8_t prev_mask = 0;
-    uint8_t current_keys = btn_mask & 0x3F;
-    uint8_t prev_keys    = prev_mask & 0x3F;
-    bool key_changed = false;
+    // Debounced Key Click Audio & Event Flag
+    bool any_pressed = btn_up_db.pressed || btn_down_db.pressed || btn_ok_db.pressed ||
+                       btn_test_db.pressed || btn_menu_db.pressed || btn_pwr_db.pressed;
+    bool any_released = btn_up_db.released || btn_down_db.released || btn_ok_db.released ||
+                        btn_test_db.released || btn_menu_db.released || btn_pwr_db.released;
+    bool key_changed = any_pressed || any_released;
 
-    if (current_keys != prev_keys) {
-        if (current_keys > prev_keys) {
-            beep_click();
-        }
-        prev_mask = btn_mask;
-        key_changed = true;
-        if (current_keys != 0) {
-            rtt.printf(">> [KEY EVENT] ACTIVE: %s (PIN: %s, MASK: 0x%02X)\n",
-                       active_btn, active_pin, btn_mask);
-        }
+    if (any_pressed) {
+        beep_click();
+        rtt.printf(">> [KEY EVENT] ACTIVE: %s (PIN: %s, MASK: 0x%02X)\n",
+                   active_btn, active_pin, btn_mask);
     }
 
     // Read live socket resting voltages periodically

@@ -784,17 +784,6 @@ void setup() {
 void loop() {
     poll_uart();
 
-    // Screen Switching: Press MENU button to toggle between 4 screens
-    static bool prev_b_menu = false;
-    uint8_t m = l083_data.btn_mask;
-    bool b_menu = (m & 0x10) != 0;
-
-    if (b_menu && !prev_b_menu) {
-        screen_mode = (screen_mode + 1) % 4;
-        need_full_redraw = true;
-    }
-    prev_b_menu = b_menu;
-
     if (need_full_redraw) {
         draw_screen_background();
         need_full_redraw = false;
@@ -806,7 +795,9 @@ void loop() {
         poll_uart();
         draw_battery_indicator(need_full_redraw);
 
+        uint8_t m = l083_data.btn_mask;
         bool b_test = (m & 0x08) != 0;
+        bool b_menu = (m & 0x10) != 0;
         char buf[64];
 
         if (screen_mode == 0) {
