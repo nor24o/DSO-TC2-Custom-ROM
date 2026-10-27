@@ -36,12 +36,12 @@ graph TD
         680Ω RL: PA7 (RL1), PB1 (RL2), PB10 (RL3)
         470kΩ RH: PB0 (RH1), PB2 (RH2), PB11 (RH3)"]
         
-        L083_TX["PA9: USART1_TX (38400)
-        PA2: USART2_TX (38400)"]
+        L083_TX["PA9: USART1_TX (115200)
+        PA2: USART2_TX (115200)"]
     end
 
     subgraph DisplayMCU ["MCU 2: STM32F103C6 (LQFP-48) - 186 FPS Graphics Host"]
-        F103_RX["PA10: USART1_RX (38400)"]
+        F103_RX["PA10: USART1_RX (115200)"]
         F103_ADC["PA0: Scope ADC Input"]
         
         F103_LCD_Ctrl["LCD Control:
@@ -84,7 +84,8 @@ graph TD
 
 | LQFP-64 Pin # | Pin Name | Peripheral | Hardware Net / Target | Active Status | Description |
 | :---: | :---: | :---: | :---: | :---: | :--- |
-| **16** | `PA2` | `USART2_TX` | Redundant Telemetry Link | **ACTIVE** | Secondary broadcast at 38,400 baud (`RX=NC`) |
+| **14** | `PA0` | `ADC_IN0` | MT3608 Zener Divider Tap| **ACTIVE** | High-voltage breakdown voltage sense (0-30V) |
+| **16** | `PA2` | `USART2_TX` | Redundant Telemetry Link | **ACTIVE** | Secondary broadcast at 115,200 baud (`RX=NC`) |
 | **17** | `PA3` | `ADC_IN3` | Socket Pin 1 Sense | **ACTIVE** | Direct analog voltage measurement tap |
 | **20** | `PA4` | `ADC_IN4` | Socket Pin 2 Sense | **ACTIVE** | Direct analog voltage measurement tap |
 | **21** | `PA5` | `ADC_IN5` | Socket Pin 3 Sense | **ACTIVE** | Direct analog voltage measurement tap |
@@ -102,8 +103,8 @@ graph TD
 | **39** | `PC8` | `GPIO / EXTI`| Button: **UP** / `^` | **ACTIVE** | Active LOW, value increment |
 | **40** | `PC9` | `GPIO / EXTI`| Button: **DOWN** / `v` | **ACTIVE** | Active LOW, value decrement |
 | **41** | `PA8` | `GPIO / EXTI`| Button: **TEST** / `HOLD` / `>`| **ACTIVE** | Active LOW, triggers component test run |
-| **42** | `PA9` | `USART1_TX`| Inter-MCU Primary TX | **ACTIVE** | Transmits telemetry packets to Display MCU @ 38,400 baud |
-| **43** | `PA10`| `USART1_RX`| Inter-MCU Primary RX | **ACTIVE** | Receives commands from Display MCU @ 38,400 baud |
+| **42** | `PA9` | `USART1_TX`| Inter-MCU Primary TX | **ACTIVE** | Transmits telemetry packets to Display MCU @ 115,200 baud |
+| **43** | `PA10`| `USART1_RX`| Inter-MCU Primary RX | **ACTIVE** | Receives commands from Display MCU @ 115,200 baud |
 | **46** | `PA13`| `SWDIO` | SWD Debug Data | **ACTIVE** | Segger J-Link programming pin |
 | **49** | `PA14`| `SWCLK` | SWD Debug Clock | **ACTIVE** | Segger J-Link programming clock |
 | **58** | `PB6` | `GPIO` | Oscilloscope Range Relay| **ACTIVE** | Solid-state relay for 1X / 10X input attenuation |

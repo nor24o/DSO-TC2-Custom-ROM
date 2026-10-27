@@ -64,6 +64,31 @@ static uint8_t backlight_level = 255;
 static bool relay_state = false;
 
 // ============================================================================
+// ZENER DIODE HIGH-VOLTAGE BREAKDOWN MEASUREMENT (MT3608 BOOST CONVERTER)
+// ============================================================================
+struct ZenerResult {
+    uint32_t zener_mv;
+    char     status[24];
+    bool     active;
+    PinName  adc_pin;
+    uint32_t en_pin;
+};
+
+static volatile ZenerResult zener_res = {0, "STANDBY", false, PA_0, 0xFF};
+
+// Candidate ADC pins on STM32L083
+static const PinName CANDIDATE_ZENER_ADC[] = {
+    PA_0, PA_1, PA_6, PC_0, PC_1, PC_2, PC_3, PC_4, PC_5
+};
+static const size_t NUM_ZENER_ADC = sizeof(CANDIDATE_ZENER_ADC) / sizeof(CANDIDATE_ZENER_ADC[0]);
+
+// Candidate MT3608 Boost EN control pins
+static const uint32_t CANDIDATE_ZENER_EN[] = {
+    PC4, PC5, PA6, PB5, PB8, PC0, PC1, PC2, PC3, PC10, PC11, PC12
+};
+static const size_t NUM_ZENER_EN = sizeof(CANDIDATE_ZENER_EN) / sizeof(CANDIDATE_ZENER_EN[0]);
+
+// ============================================================================
 // AUDIO GENERATOR ENGINE
 // ============================================================================
 static void beep_square(uint16_t freq_hz = 2700, uint16_t dur_ms = 40) {
@@ -781,6 +806,88 @@ static void run_component_test() {
     release_probes();
 }
 
+static void zener_init_probe() {
+    uint32_t vcc = read_vcc_mv();
+    rtt.println(">> [ZENER PROBE] Scanning candidate ADC & MT3608 Boost EN pins...");
+
+    uint16_t baseline[NUM_ZENER_ADC];
+    PinName best_adc = PA_0;
+    uint16_t max_mv = 0;
+
+    for (size_t i = 0; i < NUM_ZENER_ADC; i++) {
+        uint32_t raw = adc_read_value(CANDIDATE_ZENER_ADC[i], 12);
+        baseline[i] = (raw * vcc) / 4095;
+        rtt.printf("   ADC Pin idx %u: %u mV\n", (unsigned int)i, baseline[i]);
+        if (baseline[i] > max_mv) {
+            max_mv = baseline[i];
+            best_adc = CANDIDATE_ZENER_ADC[i];
+        }
+    }
+
+    if (max_mv > 1000) {
+        zener_res.adc_pin = best_adc;
+        zener_res.en_pin = 0xFF;
+        rtt.printf(">> [ZENER PROBE] Boost rail live! Detected Zener ADC pin with %u mV\n", max_mv);
+        return;
+    }
+
+    for (size_t e = 0; e < NUM_ZENER_EN; e++) {
+        uint32_t en_pin = CANDIDATE_ZENER_EN[e];
+        pinMode(en_pin, OUTPUT);
+        digitalWrite(en_pin, HIGH);
+        delay(6);
+
+        for (size_t i = 0; i < NUM_ZENER_ADC; i++) {
+            uint32_t raw = adc_read_value(CANDIDATE_ZENER_ADC[i], 12);
+            uint16_t mv = (raw * vcc) / 4095;
+            if (mv > baseline[i] + 400 && mv > 1000) {
+                zener_res.adc_pin = CANDIDATE_ZENER_ADC[i];
+                zener_res.en_pin = en_pin;
+                rtt.printf(">> [ZENER PROBE] FOUND! EN Pin: 0x%lX | ADC Pin idx: %u (%u mV)\n", en_pin, (unsigned int)i, mv);
+                return;
+            }
+        }
+        digitalWrite(en_pin, LOW);
+        pinMode(en_pin, INPUT);
+    }
+
+    zener_res.adc_pin = PA_0;
+    zener_res.en_pin = 0xFF;
+    rtt.println(">> [ZENER PROBE] Defaulting to PA_0 (Pin 14) for Zener sense.");
+}
+
+static void sample_zener() {
+    if (zener_res.en_pin != 0xFF) {
+        pinMode(zener_res.en_pin, OUTPUT);
+        digitalWrite(zener_res.en_pin, HIGH);
+        delay(4);
+    }
+
+    uint32_t vcc = read_vcc_mv();
+    uint32_t sum = 0;
+    for (int i = 0; i < 16; i++) {
+        sum += adc_read_value(zener_res.adc_pin, 12);
+        delayMicroseconds(60);
+    }
+    uint32_t raw = sum / 16;
+    uint32_t adc_mv = (raw * vcc) / 4095;
+
+    // Resistor divider scale (ratio ~10.9x: 100k+10k / 10k)
+    uint32_t vz_mv = (adc_mv * 109) / 10;
+    zener_res.zener_mv = vz_mv;
+
+    if (vz_mv > 24000) {
+        strncpy((char*)zener_res.status, "OPEN (>28V)", sizeof(zener_res.status) - 1);
+    } else if (vz_mv >= 1000) {
+        snprintf((char*)zener_res.status, sizeof(zener_res.status), "Vz = %.2f V", vz_mv / 1000.0f);
+    } else if (vz_mv >= 350) {
+        snprintf((char*)zener_res.status, sizeof(zener_res.status), "Vf = %.2f V (FWD)", vz_mv / 1000.0f);
+    } else {
+        strncpy((char*)zener_res.status, "SHORT CIRCUIT", sizeof(zener_res.status) - 1);
+    }
+    zener_res.active = true;
+}
+
 void setup() {
     // 1. Latch battery power ON
     pinMode(PIN_PWR_HOLD, OUTPUT);
@@ -833,9 +940,14 @@ void setup() {
     Serial.setRx(NC);
     Serial.begin(38400);
 
+    // Initialize Zener boost & ADC sensor
+    zener_init_probe();
+    sample_zener();
+
     rtt.println("\n\n========================================================");
     rtt.println("   FNIRSI DSO-TC2 COMPLETE HARDWARE ENGINE ONLINE       ");
-    rtt.println("   COMPONENT TESTER MEASUREMENT SYSTEM READY            ");
+    rtt.println("   SOLID 38,400 BAUD TELEMETRY LINK ACTIVE (RS0102)     ");
+    rtt.println("   ZENER HIGH-VOLTAGE & COMPONENT TESTER READY          ");
     rtt.println("========================================================\n");
 }
 
@@ -897,11 +1009,12 @@ void loop() {
         }
     }
 
-    // Run Component Test: Press TEST / HOLD (PA8) without MENU
+    // Run Component Test & Zener Sample: Press TEST / HOLD (PA8) without MENU
     static uint32_t last_test_run = 0;
-    if (b_test && !b_menu && (millis() - last_test_run > 600)) {
+    if (b_test && !b_menu && (millis() - last_test_run > 500)) {
         last_test_run = millis();
         run_component_test();
+        sample_zener();
     }
 
     // Soft Power-Off: Hold POWER for > 1.5 seconds
@@ -947,16 +1060,18 @@ void loop() {
     else if (b_menu)      { active_btn = "MENU";  active_pin = "PB15"; }
     else if (ir_active)   { active_btn = "IR_RX"; active_pin = "PB9";  }
 
-    // Key click audio
+    // Key click audio & instant event flag
     static uint8_t prev_mask = 0;
     uint8_t current_keys = btn_mask & 0x3F;
     uint8_t prev_keys    = prev_mask & 0x3F;
+    bool key_changed = false;
 
     if (current_keys != prev_keys) {
         if (current_keys > prev_keys) {
             beep_click();
         }
         prev_mask = btn_mask;
+        key_changed = true;
         if (current_keys != 0) {
             rtt.printf(">> [KEY EVENT] ACTIVE: %s (PIN: %s, MASK: 0x%02X)\n",
                        active_btn, active_pin, btn_mask);
@@ -971,6 +1086,7 @@ void loop() {
         comp_res.s1_mv = (adc_read_value(PA_3, 12) * vcc) / 4095;
         comp_res.s2_mv = (adc_read_value(PA_4, 12) * vcc) / 4095;
         comp_res.s3_mv = (adc_read_value(PA_5, 12) * vcc) / 4095;
+        sample_zener();
     }
 
     // Periodic IR Activity Log to RTT (shows raw pulses detected on PB9)
@@ -983,20 +1099,21 @@ void loop() {
         prev_ir_total = ir_edge_count;
     }
 
-    // 20 Hz Telemetry Packet to Display MCU (every 50 ms at 115200 baud)
+    // High-Speed Telemetry: 20 Hz periodic OR Instant on key change (115,200 baud)
     static uint32_t last_tx = 0;
     static uint32_t seq = 0;
 
-    if (millis() - last_tx >= 50) {
+    if (key_changed || (millis() - last_tx >= 50)) {
         last_tx = millis();
         seq++;
         uint32_t vcc = read_vcc_mv();
 
-        char buf[160];
-        snprintf(buf, sizeof(buf), "#TC2:%lu,%s,%s,%02X,%u,%lu,%lu,%s,%s,%s,%u,%u,%u\n",
+        char buf[192];
+        snprintf(buf, sizeof(buf), "#TC2:%lu,%s,%s,%02X,%u,%lu,%lu,%s,%s,%s,%u,%u,%u,%lu,%s\n",
                  seq, active_btn, active_pin, btn_mask, backlight_level, vcc, millis(),
                  comp_res.type, comp_res.value, comp_res.pinout,
-                 comp_res.s1_mv, comp_res.s2_mv, comp_res.s3_mv);
+                 comp_res.s1_mv, comp_res.s2_mv, comp_res.s3_mv,
+                 zener_res.zener_mv, zener_res.status);
 
 #if defined(USART1)
         SerialUART1.print(buf);

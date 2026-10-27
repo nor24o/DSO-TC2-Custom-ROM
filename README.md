@@ -22,7 +22,7 @@ An open-source, ultra-high-performance Custom ROM and reverse-engineering framew
 - **Dual-MCU Distributed Architecture**:
   - **Tester MCU (`STM32L083RZT6`, LQFP-64)**: Manages the 6-button physical panel, soft power latch (`PB7`), LCD backlight PWM (`PC7`), audio piezo engine (`PC6`), oscilloscope input relay (`PB6`), 38 kHz IR demodulator (`PB9`), and Karl-Heinz style 1-2-3 component tester matrix.
   - **Display MCU (`STM32F103C6`, LQFP-48)**: Drives the 2.4" 320×240 TFT LCD via direct 16-bit 8080 parallel bus at **186 Frames Per Second (FPS)**.
-  - **Synchronized Telemetry Link**: Robust 38,400-baud UART protocol (`PA9`/`PA10` + redundant `PA2`) streaming real-time component measurements, remote codes, button presses, and system health.
+  - **Synchronized High-Speed Telemetry Link**: Blazing-fast 115,200-baud UART protocol (`PA9`/`PA10` + redundant `PA2`) with **instant 0 ms event-driven key transmission** streaming real-time component measurements, remote codes, and Zener voltages with zero latency.
 - **Graphical Component Tester (Screen 1)**:
   - **Full Multi-Junction Analysis**: Automatic detection and pinout identification for BJTs (**NPN** / **PNP**), MOSFETs (**N-Channel** / **P-Channel** with body diode verification), and diodes with exact forward voltage $V_f$.
   - **True Capacitor vs. Resistor Discrimination**: Multi-sample decay filtering prevents capacitive charge transients from being falsely identified as 1.6 M$\Omega$ resistors. Accurately measures from pF up to thousands of µF.
@@ -30,10 +30,15 @@ An open-source, ultra-high-performance Custom ROM and reverse-engineering framew
 - **Dedicated 38 kHz IR Remote Protocol Decoder (Screen 2)**:
   - Hardware EXTI timer engine decoding NEC, Samsung, and Sony pulse-distance encoded protocols.
   - Clean non-overlapping display dashboard: Size-2 Command Hex/Dec, 16-bit Address, 32-bit Raw code, dynamic 32-bit bitstream visualizer, and live 3-key history log.
+- **Dedicated High-Voltage Zener Diode Tester (Screen 3)**:
+  - Measures reverse breakdown voltage ($V_z$) up to **30V** on the front `K` (Cathode) and `A` (Anode) terminals.
+  - Utilizes the onboard **Aerosemi MT3608 2A Step-Up Boost Converter** (~28V rail) with automatic current-limiting protection.
+  - Dedicated electronic Zener schematic graphic with iconic bent cathode wings and dynamic voltage classification (`Vz Breakdown`, `Open Rail >28V`, `Forward Diode Vf`, `Short Circuit`).
 - **Physical Keypad & Power Management**:
   - 6 physical buttons mapped: `POWER` (`PB13`), `OK / <` (`PB14`), `MENU / AUTO` (`PB15`), `UP / ^` (`PC8`), `DOWN / v` (`PC9`), and `TEST / >` (`PA8`).
   - Active power-hold soft latch (`PB7 = HIGH` on boot; hold POWER > 1.5s for graceful shutdown).
   - Backlight dimming (`MENU + UP/DOWN`) and relay toggle (`MENU + TEST`).
+  - Screen cycle order via MENU: `Component Tester` $\rightarrow$ `IR Decoder` $\rightarrow$ `Zener Tester` $\rightarrow$ `Console`.
 
 ---
 

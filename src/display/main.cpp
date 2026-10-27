@@ -33,11 +33,16 @@ struct L083Telemetry {
     uint16_t s1_mv;
     uint16_t s2_mv;
     uint16_t s3_mv;
+
+    // Zener Diode Fields
+    uint32_t zener_mv;
+    char zener_status[24];
 };
 
 static L083Telemetry l083_data = {
     0, "NONE", "NONE", 0, 255, 3300, 0, 0, false,
-    "NONE", "No component", "Pins 1-2-3 Open", 0, 0, 0
+    "NONE", "No component", "Pins 1-2-3 Open", 0, 0, 0,
+    0, "STANDBY"
 };
 static char last_raw_pkt[64] = "Waiting for UART...";
 
@@ -116,10 +121,13 @@ static void parse_packet(const char* pkt) {
     unsigned int mask_val, bl_val;
     char type_str[16] = "NONE", val_str[24] = "No component", pinout_str[20] = "---";
     unsigned int s1_v = 0, s2_v = 0, s3_v = 0;
+    unsigned long zener_v = 0;
+    char zener_stat_str[24] = "STANDBY";
 
-    int n = sscanf(pkt + 5, "%lu,%23[^,],%15[^,],%x,%u,%lu,%lu,%15[^,],%23[^,],%19[^,],%u,%u,%u",
+    int n = sscanf(pkt + 5, "%lu,%23[^,],%15[^,],%x,%u,%lu,%lu,%15[^,],%23[^,],%19[^,],%u,%u,%u,%lu,%23[^\n\r*]",
                    &seq, btn_str, pin_str, &mask_val, &bl_val, &vcc, &uptime,
-                   type_str, val_str, pinout_str, &s1_v, &s2_v, &s3_v);
+                   type_str, val_str, pinout_str, &s1_v, &s2_v, &s3_v,
+                   &zener_v, zener_stat_str);
 
     if (n >= 7) {
         l083_data.seq = seq;
@@ -140,6 +148,10 @@ static void parse_packet(const char* pkt) {
             l083_data.s1_mv = (uint16_t)s1_v;
             l083_data.s2_mv = (uint16_t)s2_v;
             l083_data.s3_mv = (uint16_t)s3_v;
+        }
+        if (n >= 14) {
+            l083_data.zener_mv = (uint32_t)zener_v;
+            strncpy(l083_data.zener_status, zener_stat_str, sizeof(l083_data.zener_status) - 1);
         }
     }
 }
@@ -413,6 +425,60 @@ static void draw_schematic_graphic(const char* type, const char* pinout) {
     tft_print(246, 108, s3_act ? "* PIN 3 *" : "  PIN 3  ", s3_act ? COLOR_BLACK : COLOR_WHITE, s3_act ? COLOR_GREEN : COLOR_BLACK, 1);
 }
 
+// Draw Dedicated Schematic Graphic for High-Voltage Zener Diode
+static void draw_zener_graphic(uint32_t zener_mv, const char* status) {
+    tft_fill_rect(8, 28, 304, 106, COLOR_BLACK);
+
+    // Header inside Card 1
+    tft_print(16, 32, "HIGH-VOLTAGE ZENER BREAKDOWN TEST", COLOR_YELLOW, COLOR_BLACK, 1);
+
+    // Anode Terminal Box [ A ] (Left: X=18, Y=52, W=42, H=28)
+    tft_fill_rect(18, 52, 42, 28, COLOR_NAVY);
+    tft_draw_rect(18, 52, 42, 28, COLOR_WHITE);
+    tft_print(24, 60, "[ A ]", COLOR_CYAN, COLOR_NAVY, 1);
+
+    // Anode Lead line: (60, 66) to (120, 66)
+    tft_draw_hline(60, 66, 60, COLOR_WHITE);
+
+    // Zener Triangle (pointing right to X=150, Y=66):
+    for (int i = 0; i < 30; i++) {
+        int x = 120 + i;
+        int half_h = 16 - (i * 16) / 30;
+        tft_draw_vline(x, 66 - half_h, half_h * 2 + 1, COLOR_YELLOW);
+    }
+
+    // Zener Cathode Bar at X=150 (Y=48 to 85)
+    tft_fill_rect(150, 48, 3, 37, COLOR_WHITE);
+
+    // Zener Bent Wings:
+    // Top wing: bends left from (150, 48) to (142, 48)
+    tft_fill_rect(142, 48, 9, 3, COLOR_WHITE);
+    // Bottom wing: bends right from (150, 82) to (158, 82)
+    tft_fill_rect(150, 82, 9, 3, COLOR_WHITE);
+
+    // Cathode Lead line: (153, 66) to (214, 66)
+    tft_draw_hline(153, 66, 61, COLOR_WHITE);
+
+    // Cathode Terminal Box [ K ] (Right: X=214, Y=52, W=42, H=28)
+    tft_fill_rect(214, 52, 42, 28, COLOR_NAVY);
+    tft_draw_rect(214, 52, 42, 28, COLOR_WHITE);
+    tft_print(220, 60, "[ K ]", 0xFD20, COLOR_NAVY, 1);
+
+    // Readout badge at Y=96
+    char buf[36];
+    if (zener_mv > 24000) {
+        tft_print(16, 96, "Vz: >28.0V (OPEN / NO DIODE) ", COLOR_LIGHTGREY, COLOR_BLACK, 2);
+    } else if (zener_mv >= 1000) {
+        snprintf(buf, sizeof(buf), "Vz: %4.2f V  (ZENER CLAMP)", zener_mv / 1000.0f);
+        tft_print(16, 96, buf, COLOR_GREEN, COLOR_BLACK, 2);
+    } else if (zener_mv >= 350) {
+        snprintf(buf, sizeof(buf), "Vf: %4.2f V  (FORWARD DIODE)", zener_mv / 1000.0f);
+        tft_print(16, 96, buf, COLOR_CYAN, COLOR_BLACK, 2);
+    } else {
+        tft_print(16, 96, "SHORT CIRCUIT (< 0.2V)      ", COLOR_RED, COLOR_BLACK, 2);
+    }
+}
+
 // Redraw static screen background and frames
 static void draw_screen_background() {
     tft_fill_screen(0x0842); // Clean dark navy
@@ -447,16 +513,29 @@ static void draw_screen_background() {
         tft_fill_rect(4, 138, 312, 98, COLOR_BLACK);
         tft_draw_rect(4, 138, 312, 98, COLOR_CYAN);
 
-    } else {
+    } else if (screen_mode == 2) {
         // Mode 2: Infrared Remote Decoder Console
         tft_print(8, 7, "DSO-TC2 IR DECODER (38k)", COLOR_YELLOW, 0x0010, 1);
-        tft_print(232, 7, "[M] CONSOLE", COLOR_CYAN, 0x0010, 1);
+        tft_print(232, 7, "[M] ZENER  ", COLOR_CYAN, 0x0010, 1);
 
         // Card 1: IR Decoder Dashboard (Y: 26..136)
         tft_fill_rect(4, 26, 312, 110, COLOR_BLACK);
         tft_draw_rect(4, 26, 312, 110, 0xF81F); // Magenta
 
         // Card 2: Decoded History Log (Y: 138..236)
+        tft_fill_rect(4, 138, 312, 98, COLOR_BLACK);
+        tft_draw_rect(4, 138, 312, 98, COLOR_CYAN);
+
+    } else {
+        // Mode 3: High-Voltage Zener Diode Tester
+        tft_print(8, 7, "DSO-TC2 ZENER TESTER(30V)", COLOR_YELLOW, 0x0010, 1);
+        tft_print(232, 7, "[M] CONSOLE", COLOR_CYAN, 0x0010, 1);
+
+        // Card 1: Zener Schematic Window (Y: 26..136)
+        tft_fill_rect(4, 26, 312, 110, COLOR_BLACK);
+        tft_draw_rect(4, 26, 312, 110, 0xFD20); // Orange / Gold
+
+        // Card 2: Breakdown Analysis & Parameters (Y: 138..236)
         tft_fill_rect(4, 138, 312, 98, COLOR_BLACK);
         tft_draw_rect(4, 138, 312, 98, COLOR_CYAN);
     }
@@ -473,13 +552,13 @@ void setup() {
 void loop() {
     poll_uart();
 
-    // Screen Switching: Press MENU button to toggle between 3 screens
+    // Screen Switching: Press MENU button to toggle between 4 screens
     static bool prev_b_menu = false;
     uint8_t m = l083_data.btn_mask;
     bool b_menu = (m & 0x10) != 0;
 
     if (b_menu && !prev_b_menu) {
-        screen_mode = (screen_mode + 1) % 3;
+        screen_mode = (screen_mode + 1) % 4;
         need_full_redraw = true;
     }
     prev_b_menu = b_menu;
@@ -623,7 +702,7 @@ void loop() {
             }
             poll_uart();
 
-        } else {
+        } else if (screen_mode == 2) {
             // ================================================================
             // SCREEN 2: DEDICATED INFRARED REMOTE DECODER
             // ================================================================
@@ -709,9 +788,52 @@ void loop() {
 
             tft_print(12, 212, "Sensor: PB9 Demodulator (Active-L)", COLOR_LIGHTGREY, COLOR_BLACK, 1);
             if (l083_data.connected) {
-                tft_print(12, 224, "MENU=Next | TEST=Clear | LINK:OK ", 0x07E0, COLOR_BLACK, 1);
+                tft_print(12, 224, "MENU=Next(Zener) | TEST=Clear | OK", 0x07E0, COLOR_BLACK, 1);
             } else {
                 snprintf(buf, sizeof(buf), "MENU=Next | LINK:OFFLINE (RX:%luB)", raw_rx_bytes);
+                tft_print(12, 224, buf, COLOR_RED, COLOR_BLACK, 1);
+            }
+            poll_uart();
+
+        } else if (screen_mode == 3) {
+            // ================================================================
+            // SCREEN 3: HIGH-VOLTAGE ZENER DIODE TESTER (0-30V)
+            // ================================================================
+            static uint32_t prev_zm = 999999;
+            static bool prev_redraw_zener = true;
+
+            if (abs((long)l083_data.zener_mv - (long)prev_zm) > 80 || need_full_redraw || prev_redraw_zener) {
+                draw_zener_graphic(l083_data.zener_mv, l083_data.zener_status);
+                prev_zm = l083_data.zener_mv;
+                prev_redraw_zener = false;
+            }
+
+            // Card 2: Zener Breakdown Details (Y: 138..236)
+            tft_print(12, 144, "ZENER BREAKDOWN ANALYSIS:", COLOR_CYAN, COLOR_BLACK, 1);
+
+            char zbuf[40];
+            if (l083_data.zener_mv > 24000) {
+                snprintf(zbuf, sizeof(zbuf), "Voltage: >28.0 V (Open Circuit)  ");
+            } else if (l083_data.zener_mv >= 1000) {
+                snprintf(zbuf, sizeof(zbuf), "Voltage: %4.2f V (Zener Breakdown)", l083_data.zener_mv / 1000.0f);
+            } else if (l083_data.zener_mv >= 350) {
+                snprintf(zbuf, sizeof(zbuf), "Voltage: %4.2f V (Forward Diode) ", l083_data.zener_mv / 1000.0f);
+            } else {
+                snprintf(zbuf, sizeof(zbuf), "Voltage: <0.20 V (Short Circuit) ");
+            }
+            tft_print(12, 160, zbuf, COLOR_YELLOW, COLOR_BLACK, 1);
+
+            tft_print(12, 176, "Socket:  K (Cathode) | A (Anode) ", COLOR_WHITE, COLOR_BLACK, 1);
+            tft_print(12, 192, "Boost:   MT3608 2A Step-Up (~28V)", 0xFD20, COLOR_BLACK, 1);
+            tft_print(12, 208, "TEST=Sample | MENU=Next Screen   ", 0x07E0, COLOR_BLACK, 1);
+
+            if (l083_data.connected) {
+                snprintf(buf, sizeof(buf), "VCC:%0.2fV | LINK:OK (%lu pkts)   ",
+                         l083_data.vcc_mv / 1000.0f, l083_data.total_packets);
+                tft_print(12, 224, buf, COLOR_GREEN, COLOR_BLACK, 1);
+            } else {
+                snprintf(buf, sizeof(buf), "LINK:WAITING (RX:%lu B, Pkt:%lu)  ",
+                         raw_rx_bytes, l083_data.total_packets);
                 tft_print(12, 224, buf, COLOR_RED, COLOR_BLACK, 1);
             }
             poll_uart();
