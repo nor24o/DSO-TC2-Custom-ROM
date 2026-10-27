@@ -44,12 +44,12 @@ HardwareSerial SerialUART1(USART1);
 #define PIN_PWR_HOLD   PB7    // Pin 59: Power-Hold Soft-Latch (Active HIGH)
 #define PIN_IR_RX      PB9    // Pin 62: 38 kHz Demodulated Infrared Receiver
 
-// Component Tester 1-2-3 Socket ADC Sense Channels
+// Component Tester 1-2-3 Socket Direct ADC Sense Channels
 #define PIN_SOCK_1     PA3    // Pin 17: Socket 1 (ADC_IN3)
 #define PIN_SOCK_2     PA4    // Pin 20: Socket 2 (ADC_IN4)
 #define PIN_SOCK_3     PA5    // Pin 21: Socket 3 (ADC_IN5)
 
-// Component Tester 6 Precision Resistor Probe Lines (Hardware Verified!)
+// Component Tester Precision Resistor Probe Lines (Hardware Verified)
 #define PIN_RL1        PA7    // Pin 23: S1 680 ohm probe
 #define PIN_RH1        PB0    // Pin 26: S1 470k ohm probe
 #define PIN_RL2        PB1    // Pin 27: S2 680 ohm probe
@@ -63,7 +63,7 @@ static uint8_t backlight_level = 255;
 static bool relay_state = false;
 
 // ============================================================================
-// AUDIO GENERATOR ENGINE (DUAL ACTIVE DC & PASSIVE SQUARE-WAVE)
+// AUDIO GENERATOR ENGINE
 // ============================================================================
 static void beep_square(uint16_t freq_hz = 2700, uint16_t dur_ms = 40) {
     if (freq_hz == 0 || dur_ms == 0) return;
@@ -102,8 +102,7 @@ static uint32_t read_vcc_mv() {
     return (VREFINT_CAL_VREF * cal) / raw_vref;
 }
 
-// Release all tester lines into floating high-Z
-static void release_tester_probes() {
+static void release_probes() {
     pinMode(PIN_SOCK_1, INPUT);
     pinMode(PIN_SOCK_2, INPUT);
     pinMode(PIN_SOCK_3, INPUT);
@@ -116,27 +115,151 @@ static void release_tester_probes() {
     pinMode(PIN_RH3, INPUT);
 }
 
+// ============================================================================
+// COMPONENT TESTER MEASUREMENT ENGINE
+// ============================================================================
+struct ComponentResult {
+    char type[16];     // "NONE", "RESISTOR", "DIODE", "SHORT"
+    char value[24];    // "1.00 kOhm", "0.68V"
+    char pinout[20];   // "Pins 1 - 2", "1(A) -> 2(K)"
+    uint16_t s1_mv;
+    uint16_t s2_mv;
+    uint16_t s3_mv;
+};
+
+static ComponentResult comp_res = {"NONE", "No component", "---", 0, 0, 0};
+
+static void test_pair(uint32_t pin_rl_a, PinName sock_a, uint8_t idx_a,
+                      uint32_t pin_rl_b, PinName sock_b, uint8_t idx_b,
+                      uint32_t vcc_mv, bool &found) {
+    if (found) return;
+
+    // 1. Forward probe: drive A HIGH through 680 ohm, drive B LOW (direct GND)
+    pinMode(pin_rl_a, OUTPUT);
+    digitalWrite(pin_rl_a, HIGH);
+    pinMode(pin_rl_b, OUTPUT);
+    digitalWrite(pin_rl_b, LOW);
+    delayMicroseconds(200);
+
+    uint32_t adc_va = adc_read_value(sock_a, 12);
+    uint32_t adc_vb = adc_read_value(sock_b, 12);
+    uint32_t va_fwd = (adc_va * vcc_mv) / 4095;
+    uint32_t vb_fwd = (adc_vb * vcc_mv) / 4095;
+
+    release_probes();
+    delayMicroseconds(100);
+
+    // 2. Reverse probe: drive B HIGH through 680 ohm, drive A LOW (direct GND)
+    pinMode(pin_rl_b, OUTPUT);
+    digitalWrite(pin_rl_b, HIGH);
+    pinMode(pin_rl_a, OUTPUT);
+    digitalWrite(pin_rl_a, LOW);
+    delayMicroseconds(200);
+
+    uint32_t adc_va_rev = adc_read_value(sock_a, 12);
+    uint32_t adc_vb_rev = adc_read_value(sock_b, 12);
+    uint32_t va_rev = (adc_va_rev * vcc_mv) / 4095;
+    uint32_t vb_rev = (adc_vb_rev * vcc_mv) / 4095;
+
+    release_probes();
+
+    // Check if forward conduction occurred (current through RL_B produces voltage drop)
+    bool fwd_conducts = (vb_fwd > 70) && (va_fwd > vb_fwd);
+    bool rev_conducts = (va_rev > 70) && (vb_rev > va_rev);
+
+    if (fwd_conducts && rev_conducts) {
+        // Symmetric conduction -> RESISTOR or SHORT!
+        found = true;
+        uint32_t delta_v = va_fwd - vb_fwd;
+        uint32_t r_ohm = (680UL * delta_v) / (vb_fwd > 0 ? vb_fwd : 1);
+
+        if (r_ohm < 10) {
+            strcpy(comp_res.type, "SHORT");
+            snprintf(comp_res.value, sizeof(comp_res.value), "%lu.%lu Ohm", r_ohm, (delta_v * 680UL / vb_fwd) % 10);
+            snprintf(comp_res.pinout, sizeof(comp_res.pinout), "Pins %d - %d", idx_a, idx_b);
+        } else {
+            strcpy(comp_res.type, "RESISTOR");
+            if (r_ohm < 1000) {
+                snprintf(comp_res.value, sizeof(comp_res.value), "%lu Ohm", r_ohm);
+            } else if (r_ohm < 1000000) {
+                snprintf(comp_res.value, sizeof(comp_res.value), "%lu.%02lu kOhm", r_ohm / 1000, (r_ohm % 1000) / 10);
+            } else {
+                snprintf(comp_res.value, sizeof(comp_res.value), "%lu.%02lu MOhm", r_ohm / 1000000, (r_ohm % 1000000) / 10000);
+            }
+            snprintf(comp_res.pinout, sizeof(comp_res.pinout), "Pins %d - %d", idx_a, idx_b);
+        }
+        rtt.printf(">> [COMPONENT DETECTED] %s: %s (%s)\n", comp_res.type, comp_res.value, comp_res.pinout);
+    } else if (fwd_conducts && !rev_conducts) {
+        // Forward conducts, reverse blocks -> DIODE! Anode = A, Cathode = B
+        found = true;
+        strcpy(comp_res.type, "DIODE");
+        uint32_t vf_mv = va_fwd - vb_fwd;
+        snprintf(comp_res.value, sizeof(comp_res.value), "Vf=%lu.%02luV", vf_mv / 1000, (vf_mv % 1000) / 10);
+        snprintf(comp_res.pinout, sizeof(comp_res.pinout), "%d(A) -> %d(K)", idx_a, idx_b);
+        rtt.printf(">> [COMPONENT DETECTED] DIODE: %s (%s)\n", comp_res.value, comp_res.pinout);
+    } else if (!fwd_conducts && rev_conducts) {
+        // Reverse conducts, forward blocks -> DIODE! Anode = B, Cathode = A
+        found = true;
+        strcpy(comp_res.type, "DIODE");
+        uint32_t vf_mv = vb_rev - va_rev;
+        snprintf(comp_res.value, sizeof(comp_res.value), "Vf=%lu.%02luV", vf_mv / 1000, (vf_mv % 1000) / 10);
+        snprintf(comp_res.pinout, sizeof(comp_res.pinout), "%d(A) -> %d(K)", idx_b, idx_a);
+        rtt.printf(">> [COMPONENT DETECTED] DIODE: %s (%s)\n", comp_res.value, comp_res.pinout);
+    }
+}
+
+static void run_component_test() {
+    rtt.println(">> [TESTER] Running full component measurement...");
+    beep_square(3200, 30);
+
+    uint32_t vcc = read_vcc_mv();
+    bool found = false;
+
+    // Read resting voltages
+    comp_res.s1_mv = (adc_read_value(PA_3, 12) * vcc) / 4095;
+    comp_res.s2_mv = (adc_read_value(PA_4, 12) * vcc) / 4095;
+    comp_res.s3_mv = (adc_read_value(PA_5, 12) * vcc) / 4095;
+
+    // Test Pair 1 - 2
+    test_pair(PIN_RL1, PA_3, 1, PIN_RL2, PA_4, 2, vcc, found);
+
+    // Test Pair 2 - 3
+    test_pair(PIN_RL2, PA_4, 2, PIN_RL3, PA_5, 3, vcc, found);
+
+    // Test Pair 1 - 3
+    test_pair(PIN_RL1, PA_3, 1, PIN_RL3, PA_5, 3, vcc, found);
+
+    if (!found) {
+        strcpy(comp_res.type, "NONE");
+        strcpy(comp_res.value, "No component");
+        strcpy(comp_res.pinout, "Pins 1-2-3 Open");
+        rtt.println(">> [TESTER] Result: No component detected in 1-2-3 socket.");
+    }
+
+    release_probes();
+}
+
 void setup() {
-    // 1. Immediately latch battery power ON via PB7
+    // 1. Latch battery power ON
     pinMode(PIN_PWR_HOLD, OUTPUT);
     digitalWrite(PIN_PWR_HOLD, HIGH);
 
-    // 2. Turn on LCD Backlight via PC7
+    // 2. LCD Backlight
     pinMode(PIN_BACKLIGHT, OUTPUT);
     digitalWrite(PIN_BACKLIGHT, HIGH);
 
-    // 3. Initialize Buzzer on PC6 (idle LOW)
+    // 3. Buzzer
     pinMode(PIN_BUZZER, OUTPUT);
     digitalWrite(PIN_BUZZER, LOW);
 
-    // 4. Oscilloscope Relay / Switch (PB6, default LOW)
+    // 4. Oscilloscope Relay
     pinMode(PIN_RELAY, OUTPUT);
     digitalWrite(PIN_RELAY, LOW);
 
-    // 5. Infrared Receiver (PB9, idle HIGH)
+    // 5. Infrared Receiver
     pinMode(PIN_IR_RX, INPUT_PULLUP);
 
-    // 6. Configure all 6 physical buttons with internal pullups
+    // 6. Buttons
     pinMode(PIN_BTN_PWR,  INPUT_PULLUP);
     pinMode(PIN_BTN_OK,   INPUT_PULLUP);
     pinMode(PIN_BTN_TEST, INPUT_PULLUP);
@@ -144,10 +267,10 @@ void setup() {
     pinMode(PIN_BTN_DOWN, INPUT_PULLUP);
     pinMode(PIN_BTN_MENU, INPUT_PULLUP);
 
-    // 7. Ensure component tester probes are high-Z
-    release_tester_probes();
+    // 7. Component Tester Probes high-Z
+    release_probes();
 
-    // Startup Chime (Audible on both active & passive buzzers)
+    // Startup Chime
     beep_dc(60);
     delay(30);
     beep_square(2000, 40);
@@ -164,32 +287,25 @@ void setup() {
 
     rtt.println("\n\n========================================================");
     rtt.println("   FNIRSI DSO-TC2 COMPLETE HARDWARE ENGINE ONLINE       ");
-    rtt.println("   POWER LATCH: PB7=HIGH | BACKLIGHT: PC7=HIGH          ");
-    rtt.println("   RELAY: PB6            | IR RECEIVER: PB9             ");
-    rtt.println("   BUZZER: PC6 (Active/Passive Dual-Driver)             ");
-    rtt.println("   TEST SOCKET: PA3(1), PA4(2), PA5(3)                  ");
-    rtt.println("   RL PROBES (680):  S1=PA7, S2=PB1, S3=PB10            ");
-    rtt.println("   RH PROBES (470k): S1=PB0, S2=PB2, S3=PB11            ");
-    rtt.println("   PWR=PB13, OK=PB14, TEST=PA8, UP=PC8, DN=PC9, MN=PB15 ");
+    rtt.println("   COMPONENT TESTER MEASUREMENT SYSTEM READY            ");
     rtt.println("========================================================\n");
 }
 
 void loop() {
-    // 1. Read hardware registers directly for zero latency
+    // 1. Hardware registers
     uint16_t ra = (uint16_t)GPIOA->IDR;
     uint16_t rb = (uint16_t)GPIOB->IDR;
     uint16_t rc = (uint16_t)GPIOC->IDR;
 
-    // Decode all 6 physical front buttons (active LOW)
     bool b_up    = !(rc & (1U << 8));   // PC8
     bool b_down  = !(rc & (1U << 9));   // PC9
-    bool b_ok    = !(rb & (1U << 14));  // PB14: OK / ENTER (Left button <)
-    bool b_test  = !(ra & (1U << 8));   // PA8:  TEST / HOLD (Right button >)
+    bool b_ok    = !(rb & (1U << 14));  // PB14: OK / ENTER (<)
+    bool b_test  = !(ra & (1U << 8));   // PA8:  TEST / HOLD (>)
     bool b_menu  = !(rb & (1U << 15));  // PB15: MENU / AUTO
-    bool b_pwr   = !(rb & (1U << 13));  // PB13: POWER button
+    bool b_pwr   = !(rb & (1U << 13));  // PB13: POWER
 
-    // 2. Infrared Receiver on PB9 (pulled LOW by 38 kHz pulses)
-    bool ir_pulse = !(rb & (1U << 9));  // PB9
+    // 2. IR Receiver on PB9
+    bool ir_pulse = !(rb & (1U << 9));
     static uint32_t last_ir_time = 0;
     static uint32_t ir_pulse_count = 0;
     static bool prev_ir_pulse = false;
@@ -197,12 +313,12 @@ void loop() {
         ir_pulse_count++;
         last_ir_time = millis();
         beep_square(3200, 10);
-        rtt.printf(">> [IR EVENT] Pulse detected on PB9! Count: %lu\n", ir_pulse_count);
+        rtt.printf(">> [IR EVENT] Pulse on PB9! Count: %lu\n", ir_pulse_count);
     }
     prev_ir_pulse = ir_pulse;
     bool ir_active = (millis() - last_ir_time < 300);
 
-    // 3. Oscilloscope Relay Control (PB6): Hold MENU and press TEST (PA8)
+    // 3. Relay Toggle: Hold MENU and press TEST (PA8)
     static uint32_t last_relay_toggle = 0;
     if (b_menu && b_test && (millis() - last_relay_toggle > 400)) {
         last_relay_toggle = millis();
@@ -212,7 +328,7 @@ void loop() {
         rtt.printf(">> [RELAY PB6] Toggled to: %s\n", relay_state ? "ON (HIGH)" : "OFF (LOW)");
     }
 
-    // 4. Backlight Brightness: Hold MENU and press UP or DOWN
+    // 4. Backlight Brightness: Hold MENU and press UP/DOWN
     static uint32_t last_bl_change = 0;
     if (b_menu && (millis() - last_bl_change > 150)) {
         if (b_up && backlight_level < 255) {
@@ -220,33 +336,27 @@ void loop() {
             analogWrite(PIN_BACKLIGHT, backlight_level);
             last_bl_change = millis();
             beep_square(3600, 15);
-            rtt.printf(">> Backlight UP: %u/255\n", backlight_level);
         } else if (b_down && backlight_level > 30) {
             backlight_level = (backlight_level < 55) ? 30 : (backlight_level - 25);
             analogWrite(PIN_BACKLIGHT, backlight_level);
             last_bl_change = millis();
             beep_square(1800, 15);
-            rtt.printf(">> Backlight DOWN: %u/255\n", backlight_level);
         }
     }
 
-    // 5. Diagnostic Buzzer Test: Hold MENU and press OK (PB14)
-    static uint32_t last_buzz_test = 0;
-    if (b_menu && b_ok && (millis() - last_buzz_test > 1000)) {
-        last_buzz_test = millis();
-        rtt.println(">> [BUZZER TEST RUNNING]");
-        beep_dc(150);
-        delay(80);
-        beep_square(2700, 180);
-        rtt.println(">> [BUZZER TEST COMPLETE]");
+    // 5. Run Component Test: Press TEST / HOLD (PA8) without MENU
+    static uint32_t last_test_run = 0;
+    if (b_test && !b_menu && (millis() - last_test_run > 600)) {
+        last_test_run = millis();
+        run_component_test();
     }
 
-    // 6. Soft Power-Off: Hold POWER button for > 1.5 seconds
+    // 6. Soft Power-Off: Hold POWER for > 1.5 seconds
     static uint32_t pwr_press_start = 0;
     if (b_pwr) {
         if (pwr_press_start == 0) pwr_press_start = millis();
         if (millis() - pwr_press_start > 1500) {
-            rtt.println(">> [POWER] Long press! Shutting down system...");
+            rtt.println(">> [POWER] Long press detected! Shutting down...");
             beep_square(3600, 80);
             delay(40);
             beep_square(2400, 80);
@@ -263,7 +373,7 @@ void loop() {
         pwr_press_start = 0;
     }
 
-    // 7. Pack into 8-bit status mask
+    // 7. Status Mask & Active Key
     uint8_t btn_mask = (b_up        ? 0x01 : 0) |
                        (b_down      ? 0x02 : 0) |
                        (b_ok        ? 0x04 : 0) |
@@ -284,7 +394,7 @@ void loop() {
     else if (b_menu)      { active_btn = "MENU";  active_pin = "PB15"; }
     else if (ir_active)   { active_btn = "IR_RX"; active_pin = "PB9";  }
 
-    // Audio click on button press
+    // Key click audio
     static uint8_t prev_mask = 0;
     uint8_t current_keys = btn_mask & 0x3F;
     uint8_t prev_keys    = prev_mask & 0x3F;
@@ -297,12 +407,21 @@ void loop() {
         if (current_keys != 0) {
             rtt.printf(">> [KEY EVENT] ACTIVE: %s (PIN: %s, MASK: 0x%02X)\n",
                        active_btn, active_pin, btn_mask);
-        } else {
-            rtt.println(">> [KEY EVENT] ALL RELEASED (IDLE)");
         }
     }
 
+    // Read live socket resting voltages periodically
+    static uint32_t last_volt_read = 0;
+    if (millis() - last_volt_read >= 250) {
+        last_volt_read = millis();
+        uint32_t vcc = read_vcc_mv();
+        comp_res.s1_mv = (adc_read_value(PA_3, 12) * vcc) / 4095;
+        comp_res.s2_mv = (adc_read_value(PA_4, 12) * vcc) / 4095;
+        comp_res.s3_mv = (adc_read_value(PA_5, 12) * vcc) / 4095;
+    }
+
     // 25 Hz Telemetry Packet to Display MCU
+    // Format: #TC2:<seq>,<btn>,<pin>,<mask_hex>,<bl>,<vcc>,<uptime>,<type>,<val>,<pinout>,<s1_mv>,<s2_mv>,<s3_mv>*\n
     static uint32_t last_tx = 0;
     static uint32_t seq = 0;
 
@@ -311,10 +430,11 @@ void loop() {
         seq++;
         uint32_t vcc = read_vcc_mv();
 
-        // Packet format: #TC2:<seq>,<btn_str>,<pin_str>,<mask_hex>,<bl_val>,<vcc>,<uptime>*\n
-        char buf[128];
-        snprintf(buf, sizeof(buf), "#TC2:%lu,%s,%s,%02X,%u,%lu,%lu*\n",
-                 seq, active_btn, active_pin, btn_mask, backlight_level, vcc, millis());
+        char buf[160];
+        snprintf(buf, sizeof(buf), "#TC2:%lu,%s,%s,%02X,%u,%lu,%lu,%s,%s,%s,%u,%u,%u*\n",
+                 seq, active_btn, active_pin, btn_mask, backlight_level, vcc, millis(),
+                 comp_res.type, comp_res.value, comp_res.pinout,
+                 comp_res.s1_mv, comp_res.s2_mv, comp_res.s3_mv);
 
 #if defined(USART1)
         SerialUART1.print(buf);
