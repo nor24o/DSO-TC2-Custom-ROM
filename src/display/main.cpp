@@ -14,7 +14,7 @@
 
 RTTStream rtt;
 
-// Secondary MCU Telemetry & Component Tester Result
+// Secondary MCU Telemetry & Instruments
 struct L083Telemetry {
     uint32_t seq;
     char active_btn[24];
@@ -37,59 +37,34 @@ struct L083Telemetry {
     // Zener Diode Fields
     uint32_t zener_mv;
     char zener_status[24];
+
+    // Real Li-Po Battery & External SMA Voltmeter (from STM32L083)
+    uint16_t batt_mv;
+    uint16_t sma_mv;
+
+    // Signal Generator (PB8 PWM)
+    uint32_t siggen_freq;
+    uint8_t  siggen_on;
+
+    // Active Instrument Mode (0 = Tester, 1 = IR Decoder, 2 = Zener, 3 = SigGen & Voltmeter)
+    uint8_t  mode;
 };
 
 static L083Telemetry l083_data = {
     0, "NONE", "NONE", 0, 255, 3300, 0, 0, false,
     "NONE", "No component", "Pins 1-2-3 Open", 0, 0, 0,
-    0, "STANDBY"
+    0, "STANDBY",
+    3800, 0,
+    1000, 0,
+    0
 };
 static char last_raw_pkt[64] = "Waiting for UART...";
 
-// Li-Po Battery Monitor (Direct register ADC on PA2 with 2:1 hardware voltage divider)
+// Li-Po Battery Monitor (Updated live from STM32L083 PA2 2:1 divider telemetry)
 static uint16_t batt_mv = 3800;
 static uint8_t  batt_pct = 75;
 static uint8_t  prev_batt_pct = 0xFF;
 static uint16_t prev_batt_mv = 0;
-
-static uint16_t adc_read_pa2() {
-    RCC->APB2ENR |= (RCC_APB2ENR_ADC1EN | RCC_APB2ENR_IOPAEN);
-    GPIOA->CRL &= ~(0x0FUL << 8); // PA2 analog input mode (MODE2=00, CNF2=00)
-    ADC1->CR2 |= ADC_CR2_ADON;
-    ADC1->SQR3 = 2; // Channel 2 (PA2)
-    ADC1->CR2 |= ADC_CR2_SWSTART;
-    uint32_t to = 2000;
-    while (!(ADC1->SR & ADC_SR_EOC) && --to);
-    return (uint16_t)ADC1->DR;
-}
-
-static void update_battery() {
-    static uint32_t last_sample = 0;
-    if (millis() - last_sample < 300) return;
-    last_sample = millis();
-
-    uint32_t sum = 0;
-    for (int i = 0; i < 8; i++) {
-        sum += adc_read_pa2();
-    }
-    uint32_t raw_avg = sum / 8;
-
-    // 12-bit ADC (3300 mV VREF) and 2:1 hardware divider (Vbatt = 2 * Vadc):
-    // Vbatt = raw * 6600 / 4095
-    uint32_t measured_mv = (raw_avg * 6600UL) / 4095UL;
-
-    if (batt_mv == 3800 && prev_batt_pct == 0xFF) batt_mv = measured_mv;
-    else batt_mv = (batt_mv * 3 + measured_mv) / 4;
-
-    // Li-Po discharge curve (3.30V = 0%, 4.18V = 100%)
-    if (batt_mv <= 3300) {
-        batt_pct = 0;
-    } else if (batt_mv >= 4180) {
-        batt_pct = 100;
-    } else {
-        batt_pct = (uint8_t)(((uint32_t)(batt_mv - 3300) * 100UL) / (4180UL - 3300UL));
-    }
-}
 
 static void draw_battery_indicator(bool force_redraw) {
     if (!force_redraw && batt_pct == prev_batt_pct && abs((int)batt_mv - (int)prev_batt_mv) < 30) {
@@ -141,12 +116,12 @@ static IrRxTelemetry ir_rx = {
     {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, 0
 };
 
-// Screen Mode: 0 = Hardware Console, 1 = Component Tester, 2 = IR Remote Decoder
-static uint8_t screen_mode = 1;
+// Screen Mode: 0 = Tester & Sensors, 1 = IR Decoder, 2 = Zener Diode, 3 = SigGen & SMA Volt
+static uint8_t screen_mode = 0;
 static bool need_full_redraw = true;
 
 // Serial Parser
-static char rx_buf[160];
+static char rx_buf[224];
 static uint8_t rx_idx = 0;
 static uint32_t last_rx_time = 0;
 static uint32_t raw_rx_bytes = 0;
@@ -197,11 +172,14 @@ static void parse_packet(const char* pkt) {
     unsigned int s1_v = 0, s2_v = 0, s3_v = 0;
     unsigned long zener_v = 0;
     char zener_stat_str[24] = "STANDBY";
+    unsigned int batt_v = 3800, sma_v = 0, sig_on = 0, sc_mode = 0;
+    unsigned long sig_f = 1000;
 
-    int n = sscanf(pkt + 5, "%lu,%23[^,],%15[^,],%x,%u,%lu,%lu,%15[^,],%23[^,],%27[^,],%u,%u,%u,%lu,%23[^\n\r*]",
+    int n = sscanf(pkt + 5, "%lu,%23[^,],%15[^,],%x,%u,%lu,%lu,%15[^,],%23[^,],%27[^,],%u,%u,%u,%lu,%23[^,],%u,%u,%lu,%u,%u",
                    &seq, btn_str, pin_str, &mask_val, &bl_val, &vcc, &uptime,
                    type_str, val_str, pinout_str, &s1_v, &s2_v, &s3_v,
-                   &zener_v, zener_stat_str);
+                   &zener_v, zener_stat_str,
+                   &batt_v, &sma_v, &sig_f, &sig_on, &sc_mode);
 
     if (n >= 7) {
         l083_data.seq = seq;
@@ -226,6 +204,22 @@ static void parse_packet(const char* pkt) {
         if (n >= 14) {
             l083_data.zener_mv = (uint32_t)zener_v;
             strncpy(l083_data.zener_status, zener_stat_str, sizeof(l083_data.zener_status) - 1);
+        }
+        if (n >= 19) {
+            l083_data.batt_mv = (uint16_t)batt_v;
+            l083_data.sma_mv  = (uint16_t)sma_v;
+            l083_data.siggen_freq = (uint32_t)sig_f;
+            l083_data.siggen_on   = (uint8_t)sig_on;
+            if (sc_mode < 4 && sc_mode != screen_mode) {
+                screen_mode = (uint8_t)sc_mode;
+                need_full_redraw = true;
+            }
+            if (batt_v >= 2500 && batt_v <= 5000) {
+                batt_mv = (uint16_t)batt_v;
+                if (batt_mv <= 3300) batt_pct = 0;
+                else if (batt_mv >= 4180) batt_pct = 100;
+                else batt_pct = (uint8_t)(((uint32_t)(batt_mv - 3300) * 100UL) / (4180UL - 3300UL));
+            }
         }
     }
 }
@@ -632,6 +626,89 @@ static void draw_zener_graphic(uint32_t zener_mv, const char* status) {
     }
 }
 
+// Draw Dedicated UI Graphic for Programmable Signal Generator (PB8) & SMA Voltmeter (PA6)
+static void draw_siggen_graphic(uint32_t freq_hz, bool is_on, uint16_t sma_mv, bool redraw_all) {
+    // Card 1 Header inside Card 1 (Y: 26..136)
+    if (redraw_all) {
+        tft_print(12, 32, "PWM SIGNAL GENERATOR (PB8)", COLOR_CYAN, COLOR_BLACK, 1);
+    }
+
+    // Output State Badge at (X: 190, Y: 46)
+    if (is_on) {
+        tft_fill_rect(190, 46, 116, 22, COLOR_GREEN);
+        tft_draw_rect(190, 46, 116, 22, COLOR_WHITE);
+        tft_print(200, 52, "OUTPUT: ON ", COLOR_BLACK, COLOR_GREEN, 1);
+    } else {
+        tft_fill_rect(190, 46, 116, 22, 0x2104);
+        tft_draw_rect(190, 46, 116, 22, COLOR_DARKGREY);
+        tft_print(200, 52, "OUTPUT: OFF", COLOR_LIGHTGREY, 0x2104, 1);
+    }
+
+    // Large Frequency Readout (Size 2, X: 16, Y: 48)
+    char fbuf[24];
+    if (freq_hz >= 1000) {
+        uint32_t khz = freq_hz / 1000;
+        uint32_t rem = (freq_hz % 1000) / 10;
+        snprintf(fbuf, sizeof(fbuf), "%2lu.%02lu kHz  ", khz, rem);
+    } else {
+        snprintf(fbuf, sizeof(fbuf), "%4lu Hz     ", freq_hz);
+    }
+    tft_print(16, 48, fbuf, COLOR_YELLOW, COLOR_BLACK, 2);
+
+    // Square wave graphic across (X: 16..296, Y: 76..106)
+    tft_fill_rect(16, 76, 284, 34, COLOR_BLACK);
+    uint16_t wave_col = is_on ? COLOR_GREEN : COLOR_DARKGREY;
+    int16_t y_low = 104;
+    int16_t y_hi  = 78;
+    int16_t x = 18;
+    int16_t pw = 28; // pulse width
+    while (x + pw * 2 < 296) {
+        tft_draw_hline(x, y_hi, pw, wave_col);
+        tft_draw_vline(x + pw, y_hi, y_low - y_hi, wave_col);
+        tft_draw_hline(x + pw, y_low, pw, wave_col);
+        tft_draw_vline(x + pw * 2, y_hi, y_low - y_hi, wave_col);
+        x += pw * 2;
+    }
+
+    // Hint footer inside Card 1
+    tft_print(16, 118, "UP/DN: Frequency | TEST: Output Toggle", COLOR_YELLOW, COLOR_BLACK, 1);
+
+    // Card 2: SMA External Voltmeter (Y: 138..236)
+    if (redraw_all) {
+        tft_print(12, 144, "SMA EXTERNAL VOLTMETER (PA6 - Pin 22)", COLOR_YELLOW, COLOR_BLACK, 1);
+    }
+
+    // Large Voltage Readout (Size 2, X: 16, Y: 160)
+    char vbuf[32];
+    uint32_t v_int = sma_mv / 1000;
+    uint32_t v_dec = (sma_mv % 1000) / 10;
+    snprintf(vbuf, sizeof(vbuf), "V_in = %lu.%02lu V   ", v_int, v_dec);
+    tft_print(16, 160, vbuf, COLOR_CYAN, COLOR_BLACK, 2);
+
+    // Visual Analog Bargraph (X: 16..296, Y: 184, W: 280, H: 12)
+    tft_draw_rect(16, 184, 280, 12, COLOR_WHITE);
+    uint16_t bar_w = (sma_mv > 3300) ? 276 : (uint16_t)(((uint32_t)sma_mv * 276UL) / 3300UL);
+    if (bar_w > 0) {
+        uint16_t b_col = (sma_mv > 2800) ? COLOR_RED : (sma_mv > 1500) ? COLOR_YELLOW : COLOR_GREEN;
+        tft_fill_rect(18, 186, bar_w, 8, b_col);
+    }
+    if (bar_w < 276) {
+        tft_fill_rect(18 + bar_w, 186, 276 - bar_w, 8, COLOR_BLACK);
+    }
+
+    // Scale markers below bar
+    tft_print(16, 198, "0.0V", COLOR_LIGHTGREY, COLOR_BLACK, 1);
+    tft_print(144, 198, "1.65V", COLOR_LIGHTGREY, COLOR_BLACK, 1);
+    tft_print(266, 198, "3.3V+", COLOR_LIGHTGREY, COLOR_BLACK, 1);
+
+    // Telemetry Footer
+    char tbuf[48];
+    snprintf(tbuf, sizeof(tbuf), "VCC:%lu.%02luV | BATT:%lu.%02luV (%u%%) ",
+             l083_data.vcc_mv / 1000, (l083_data.vcc_mv % 1000) / 10,
+             (uint32_t)batt_mv / 1000, ((uint32_t)batt_mv % 1000) / 10, batt_pct);
+    tft_print(12, 222, tbuf, COLOR_GREEN, COLOR_BLACK, 1);
+}
+
 // Redraw static screen background and frames
 static void draw_screen_background() {
     tft_fill_screen(0x0842); // Clean dark navy
@@ -641,20 +718,7 @@ static void draw_screen_background() {
     tft_draw_hline(0, 24, TFT_WIDTH, COLOR_CYAN);
 
     if (screen_mode == 0) {
-        // Mode 0: Hardware Console
-        tft_print(8, 7, "CONSOLE", COLOR_YELLOW, 0x0010, 1);
-        tft_print(110, 7, "[M] TESTER", COLOR_CYAN, 0x0010, 1);
-
-        // Card 1: Keypad Matrix (Y: 26..136)
-        tft_fill_rect(4, 26, 312, 110, COLOR_BLACK);
-        tft_draw_rect(4, 26, 312, 110, COLOR_DARKCYAN);
-
-        // Card 2: Diagnostics (Y: 138..236)
-        tft_fill_rect(4, 138, 312, 98, COLOR_BLACK);
-        tft_draw_rect(4, 138, 312, 98, COLOR_YELLOW);
-
-    } else if (screen_mode == 1) {
-        // Mode 1: Graphical Component Tester Console
+        // Mode 0: Graphical Component Tester & Digital Sensors
         tft_print(8, 7, "TESTER", COLOR_YELLOW, 0x0010, 1);
         tft_print(110, 7, "[M] IR DEC", COLOR_CYAN, 0x0010, 1);
 
@@ -666,8 +730,8 @@ static void draw_screen_background() {
         tft_fill_rect(4, 138, 312, 98, COLOR_BLACK);
         tft_draw_rect(4, 138, 312, 98, COLOR_CYAN);
 
-    } else if (screen_mode == 2) {
-        // Mode 2: Infrared Remote Decoder Console
+    } else if (screen_mode == 1) {
+        // Mode 1: Infrared Remote Decoder Console
         tft_print(8, 7, "IR DECODER", COLOR_YELLOW, 0x0010, 1);
         tft_print(110, 7, "[M] ZENER ", COLOR_CYAN, 0x0010, 1);
 
@@ -679,10 +743,10 @@ static void draw_screen_background() {
         tft_fill_rect(4, 138, 312, 98, COLOR_BLACK);
         tft_draw_rect(4, 138, 312, 98, COLOR_CYAN);
 
-    } else {
-        // Mode 3: High-Voltage Zener Diode Tester
+    } else if (screen_mode == 2) {
+        // Mode 2: High-Voltage Zener Diode Tester (0-30V)
         tft_print(8, 7, "ZENER(30V)", COLOR_YELLOW, 0x0010, 1);
-        tft_print(110, 7, "[M] CONSOLE", COLOR_CYAN, 0x0010, 1);
+        tft_print(110, 7, "[M] SIGGEN", COLOR_CYAN, 0x0010, 1);
 
         // Card 1: Zener Schematic Window (Y: 26..136)
         tft_fill_rect(4, 26, 312, 110, COLOR_BLACK);
@@ -691,6 +755,19 @@ static void draw_screen_background() {
         // Card 2: Breakdown Analysis & Parameters (Y: 138..236)
         tft_fill_rect(4, 138, 312, 98, COLOR_BLACK);
         tft_draw_rect(4, 138, 312, 98, COLOR_CYAN);
+
+    } else {
+        // Mode 3: Signal Generator & SMA Voltmeter
+        tft_print(8, 7, "SIG GEN&VOLT", COLOR_YELLOW, 0x0010, 1);
+        tft_print(110, 7, "[M] TESTER", COLOR_CYAN, 0x0010, 1);
+
+        // Card 1: PWM Signal Generator (PB8) (Y: 26..136)
+        tft_fill_rect(4, 26, 312, 110, COLOR_BLACK);
+        tft_draw_rect(4, 26, 312, 110, COLOR_GREEN);
+
+        // Card 2: SMA External Voltmeter (PA6) (Y: 138..236)
+        tft_fill_rect(4, 138, 312, 98, COLOR_BLACK);
+        tft_draw_rect(4, 138, 312, 98, COLOR_YELLOW);
     }
 
     draw_battery_indicator(true);
@@ -701,7 +778,6 @@ void setup() {
     Serial1.setRx(PA10);
     Serial1.setTx(PA9);
     Serial1.begin(38400);
-    update_battery();
     draw_screen_background();
 }
 
@@ -725,84 +801,20 @@ void loop() {
     }
 
     static uint32_t last_ui = 0;
-    if (millis() - last_ui >= 50) { // 20 Hz UI refresh
+    if (millis() - last_ui >= 40) { // 25 Hz UI refresh
         last_ui = millis();
         poll_uart();
-        update_battery();
         draw_battery_indicator(need_full_redraw);
 
-        bool b_up    = (m & 0x01) != 0;
-        bool b_down  = (m & 0x02) != 0;
-        bool b_ok    = (m & 0x04) != 0;
-        bool b_test  = (m & 0x08) != 0;
-        bool b_pwr   = (m & 0x20) != 0;
-        bool b_relay = (m & 0x40) != 0;
-        bool b_ir    = (m & 0x80) != 0;
-        bool b_buzz  = ((m & 0x3F) != 0) || b_ir;
-
+        bool b_test = (m & 0x08) != 0;
         char buf[64];
 
         if (screen_mode == 0) {
             // ================================================================
-            // SCREEN 0: HARDWARE CONSOLE & KEYPAD MATRIX
+            // SCREEN 0: COMPONENT TESTER & 1-WIRE / DIGITAL SENSORS
             // ================================================================
-            static uint8_t prev_m_drawn = 0xFF;
-            if (need_full_redraw || m != prev_m_drawn) {
-                prev_m_drawn = m;
-                draw_btn(12, 30, 92, 28, "POWER", "PB13", b_pwr);
-                draw_btn(114, 30, 92, 28, "UP ^", "PC8", b_up);
-                draw_btn(216, 30, 92, 28, "MENU", "PB15", b_menu);
-
-                draw_btn(12, 64, 92, 28, "OK / <", "PB14", b_ok);
-                draw_btn(114, 64, 92, 28, "RELAY", b_relay ? "ON:PB6" : "OFF:PB6", b_relay);
-                draw_btn(216, 64, 92, 28, "TEST / >", "PA8", b_test);
-
-                draw_btn(12, 98, 92, 28, "BUZZER", b_buzz ? "ACTIVE" : "PC6", b_buzz);
-                draw_btn(114, 98, 92, 28, "DOWN v", "PC9", b_down);
-                draw_btn(216, 98, 92, 28, "IR RX", b_ir ? "SIGNAL!" : "PB9", b_ir);
-            }
-
-            if (b_pwr) {
-                tft_print(10, 144, ">> POWER: PB13 (Hold 1.5s=Off)  ", COLOR_RED, COLOR_BLACK, 1);
-            } else if (b_ir) {
-                tft_print(10, 144, ">> IR SIGNAL DETECTED ON PB9! <<", COLOR_CYAN, COLOR_BLACK, 1);
-            } else if ((m & 0x3F) != 0) {
-                snprintf(buf, sizeof(buf), ">> KEY: %-5s  PIN: %-4s (0x%02X)   ", 
-                         l083_data.active_btn, l083_data.active_pin, m);
-                tft_print(10, 144, buf, COLOR_GREEN, COLOR_BLACK, 1);
-            } else {
-                tft_print(10, 144, "STATUS: All 6 Keys & HW Ready   ", COLOR_LIGHTGREY, COLOR_BLACK, 1);
-            }
-
-            tft_print(10, 160, "TESTER SENSE: 1=PA3  2=PA4  3=PA5", COLOR_YELLOW, COLOR_BLACK, 1);
-            tft_print(10, 176, "RL:PA7,PB1,PB10 | RH:PB0,PB2,PB11", COLOR_CYAN, COLOR_BLACK, 1);
-
-            uint8_t bl_pct = (uint16_t)l083_data.backlight * 100 / 255;
-            snprintf(buf, sizeof(buf), "BL:%2u%% | PWR:PB7 | RLY:%-3s | BUZ:PC6", 
-                     bl_pct, b_relay ? "ON" : "OFF");
-            tft_print(10, 192, buf, COLOR_WHITE, COLOR_BLACK, 1);
-
-            if (l083_data.connected) {
-                snprintf(buf, sizeof(buf), "VCC:%lu.%02luV | BATT:%lu.%02luV (%u%%)  ",
-                         l083_data.vcc_mv / 1000, (l083_data.vcc_mv % 1000) / 10,
-                         (uint32_t)batt_mv / 1000, ((uint32_t)batt_mv % 1000) / 10, batt_pct);
-                tft_print(10, 208, buf, 0x07E0, COLOR_BLACK, 1);
-            } else {
-                snprintf(buf, sizeof(buf), "OFFLINE | BATT:%lu.%02luV (%u%%)    ",
-                         (uint32_t)batt_mv / 1000, ((uint32_t)batt_mv % 1000) / 10, batt_pct);
-                tft_print(10, 208, buf, COLOR_RED, COLOR_BLACK, 1);
-            }
-
-            tft_print(10, 222, "Press MENU to switch to Tester  ", COLOR_LIGHTGREY, COLOR_BLACK, 1);
-            poll_uart();
-
-        } else if (screen_mode == 1) {
-            // ================================================================
-            // SCREEN 1: DEDICATED GRAPHICAL COMPONENT TESTER
-            // ================================================================
-            // 1. Draw Visual Schematic Graphic & ZIF Socket
             static char prev_type[16] = "";
-            static char prev_pinout[20] = "";
+            static char prev_pinout[28] = "";
             if (strcmp(l083_data.comp_type, prev_type) != 0 || 
                 strcmp(l083_data.comp_pinout, prev_pinout) != 0 || 
                 need_full_redraw) {
@@ -811,7 +823,6 @@ void loop() {
                 strncpy(prev_pinout, l083_data.comp_pinout, sizeof(prev_pinout) - 1);
             }
 
-            // 2. Component Measurement Text (Flicker-free padded printing)
             static char prev_val_display[24] = "";
             static char prev_pin_display[28] = "";
             static char prev_type_display[28] = "";
@@ -820,8 +831,8 @@ void loop() {
             if (is_empty) {
                 if (need_full_redraw || strcmp(prev_val_display, "READY") != 0) {
                     tft_print(16, 81, "READY               ", COLOR_LIGHTGREY, COLOR_BLACK, 2);
-                    tft_print(16, 104, "Insert component in socket", COLOR_YELLOW, COLOR_BLACK, 1);
-                    tft_print(16, 120, "Press TEST to measure     ", COLOR_GREEN, COLOR_BLACK, 1);
+                    tft_print(16, 104, "Socket 1-2-3 (Auto-detect) ", COLOR_YELLOW, COLOR_BLACK, 1);
+                    tft_print(16, 120, "DS18B20, DHT, RLC, BJT, MOS", COLOR_CYAN, COLOR_BLACK, 1);
                     strcpy(prev_val_display, "READY");
                     prev_pin_display[0] = '\0';
                     prev_type_display[0] = '\0';
@@ -849,7 +860,7 @@ void loop() {
                 }
             }
 
-            // Bottom Card: Socket Terminals & Voltage Readings (Differential redraw)
+            // Bottom Card: Socket Terminals & Voltage Readings
             static uint16_t prev_s1 = 9999, prev_s2 = 9999, prev_s3 = 9999;
             if (need_full_redraw || abs((int)l083_data.s1_mv - (int)prev_s1) > 50) {
                 snprintf(buf, sizeof(buf), "%4u mV", l083_data.s1_mv);
@@ -867,7 +878,6 @@ void loop() {
                 prev_s3 = l083_data.s3_mv;
             }
 
-            // Status lines inside Card 2
             tft_print(12, 184, "RL: 680R (PA7,PB1,PB10) | RH: 470k", COLOR_YELLOW, COLOR_BLACK, 1);
             tft_print(12, 198, "Sense: PA3(1), PA4(2), PA5(3)     ", COLOR_CYAN, COLOR_BLACK, 1);
             tft_print(12, 212, "TEST=Measure | MENU=Switch IR Dec ", 0x07E0, COLOR_BLACK, 1);
@@ -884,27 +894,24 @@ void loop() {
             }
             poll_uart();
 
-        } else if (screen_mode == 2) {
+        } else if (screen_mode == 1) {
             // ================================================================
-            // SCREEN 2: DEDICATED INFRARED REMOTE DECODER
+            // SCREEN 1: DEDICATED INFRARED REMOTE DECODER
             // ================================================================
             static bool prev_received = false;
             static uint8_t prev_hist_cnt = 255;
 
-            // Clear test log if TEST pressed without holding MENU
             if (b_test && !b_menu) {
                 ir_rx.received = false;
                 ir_rx.hist_cnt = 0;
                 ir_rx.raw_code = 0;
             }
 
-            // Cleanly clear Card 1 on state change or full redraw
             if (ir_rx.received != prev_received || need_full_redraw) {
                 tft_fill_rect(5, 27, 310, 108, COLOR_BLACK);
                 prev_received = ir_rx.received;
             }
 
-            // Card 1: Decoder Dashboard (Y: 26..136)
             if (!ir_rx.received) {
                 tft_print(16, 36, "[ WAITING FOR IR REMOTE... ]    ", COLOR_YELLOW, COLOR_BLACK, 1);
                 tft_print(16, 54, "Point remote at front sensor PB9", COLOR_WHITE, COLOR_BLACK, 1);
@@ -919,19 +926,15 @@ void loop() {
                     tft_print(16, 30, "-- LAST RECEIVED IR CODE --     ", COLOR_LIGHTGREY, COLOR_BLACK, 1);
                 }
 
-                // Line 2: Large Command (Y: 44, Size 2)
                 snprintf(buf, sizeof(buf), "CMD:  0x%02X (%3u)", ir_rx.command, ir_rx.command);
                 tft_print(16, 44, buf, COLOR_YELLOW, COLOR_BLACK, 2);
 
-                // Line 3: Address & Protocol (Y: 66, Size 1)
                 snprintf(buf, sizeof(buf), "ADDR: 0x%04X | Proto: %-5s", ir_rx.address, ir_rx.protocol);
                 tft_print(16, 66, buf, COLOR_CYAN, COLOR_BLACK, 1);
 
-                // Line 4: Raw 32-bit Code & Repeats (Y: 82, Size 1)
                 snprintf(buf, sizeof(buf), "RAW:  0x%08lX | Rpt: %-3lu", ir_rx.raw_code, ir_rx.repeats);
                 tft_print(16, 82, buf, COLOR_WHITE, COLOR_BLACK, 1);
 
-                // Line 5: 32-Bit Visual Pulse Bar (Y: 98, Size 1)
                 tft_print(16, 98, "Bits: [MSB]", COLOR_DARKGREY, COLOR_BLACK, 1);
                 tft_print(250, 98, "[LSB]", COLOR_DARKGREY, COLOR_BLACK, 1);
                 for (int b = 0; b < 32; b++) {
@@ -946,7 +949,6 @@ void loop() {
                 tft_print(16, 120, buf, (ago < 1) ? COLOR_GREEN : COLOR_LIGHTGREY, COLOR_BLACK, 1);
             }
 
-            // Card 2: History Log (Y: 138..236)
             if (ir_rx.hist_cnt != prev_hist_cnt || need_full_redraw) {
                 tft_fill_rect(5, 154, 310, 56, COLOR_BLACK);
                 prev_hist_cnt = ir_rx.hist_cnt;
@@ -977,9 +979,9 @@ void loop() {
             }
             poll_uart();
 
-        } else if (screen_mode == 3) {
+        } else if (screen_mode == 2) {
             // ================================================================
-            // SCREEN 3: HIGH-VOLTAGE ZENER DIODE TESTER (0-30V)
+            // SCREEN 2: HIGH-VOLTAGE ZENER DIODE TESTER (0-30V)
             // ================================================================
             static uint32_t prev_zm = 999999;
             static char prev_zstat[24] = "";
@@ -992,7 +994,6 @@ void loop() {
                 strncpy(prev_zstat, l083_data.zener_status, sizeof(prev_zstat) - 1);
             }
 
-            // Card 2: Zener Breakdown Details (Y: 138..236)
             tft_print(12, 144, "ZENER BREAKDOWN ANALYSIS:", COLOR_CYAN, COLOR_BLACK, 1);
 
             char zbuf[40];
@@ -1022,6 +1023,27 @@ void loop() {
                 snprintf(buf, sizeof(buf), "LINK:WAITING | BATT:%lu.%02luV (%u%%)",
                          (uint32_t)batt_mv / 1000, ((uint32_t)batt_mv % 1000) / 10, batt_pct);
                 tft_print(12, 224, buf, COLOR_RED, COLOR_BLACK, 1);
+            }
+            poll_uart();
+
+        } else if (screen_mode == 3) {
+            // ================================================================
+            // SCREEN 3: PROGRAMMABLE SIGNAL GENERATOR & SMA VOLTMETER
+            // ================================================================
+            static uint32_t prev_sig_freq = 0xFFFFFFFF;
+            static uint8_t  prev_sig_on   = 0xFF;
+            static uint16_t prev_sma_mv   = 0xFFFF;
+
+            bool freq_changed = (l083_data.siggen_freq != prev_sig_freq);
+            bool state_changed = (l083_data.siggen_on != prev_sig_on);
+            bool sma_changed = (abs((int)l083_data.sma_mv - (int)prev_sma_mv) > 20);
+
+            if (need_full_redraw || freq_changed || state_changed || sma_changed) {
+                draw_siggen_graphic(l083_data.siggen_freq, l083_data.siggen_on != 0,
+                                    l083_data.sma_mv, need_full_redraw);
+                prev_sig_freq = l083_data.siggen_freq;
+                prev_sig_on   = l083_data.siggen_on;
+                prev_sma_mv   = l083_data.sma_mv;
             }
             poll_uart();
         }

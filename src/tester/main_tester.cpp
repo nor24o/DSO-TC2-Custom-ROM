@@ -44,6 +44,9 @@ HardwareSerial SerialUART1(USART1);
 #define PIN_RELAY      PB6    // Pin 58: Oscilloscope Solid-State Relay / Range Switch
 #define PIN_PWR_HOLD   PB7    // Pin 59: Power-Hold Soft-Latch (Active HIGH)
 #define PIN_IR_RX      PB9    // Pin 62: 38 kHz Demodulated Infrared Receiver
+#define PIN_SIGGEN     PB8    // Pin 61: Programmable PWM / Square Wave Signal Generator
+#define PIN_BATT_ADC   PA2    // Pin 16: Li-Po Battery 2:1 Voltage Divider (ADC_IN2)
+#define PIN_SMA_ADC    PA6    // Pin 22: External SMA/MCX Connector Tap (ADC_IN6)
 
 // Component Tester 1-2-3 Socket Direct ADC Sense Channels
 #define PIN_SOCK_1     PA3    // Pin 17: Socket 1 (ADC_IN3)
@@ -76,17 +79,59 @@ struct ZenerResult {
 
 static volatile ZenerResult zener_res = {0, "STANDBY", false, PA_0, 0xFF};
 
-// Candidate ADC pins on STM32L083
+// Candidate ADC pins on STM32L083 (Excluded PA2 for Batt, PA6 for SMA)
 static const PinName CANDIDATE_ZENER_ADC[] = {
-    PA_0, PA_1, PA_6, PC_0, PC_1, PC_2, PC_3, PC_4, PC_5
+    PA_0, PA_1, PC_0, PC_1, PC_2, PC_3, PC_4, PC_5
 };
 static const size_t NUM_ZENER_ADC = sizeof(CANDIDATE_ZENER_ADC) / sizeof(CANDIDATE_ZENER_ADC[0]);
 
-// Candidate MT3608 Boost EN control pins
+// Candidate MT3608 Boost EN control pins (Excluded PB8 for SigGen)
 static const uint32_t CANDIDATE_ZENER_EN[] = {
-    PC4, PC5, PA6, PB5, PB8, PC0, PC1, PC2, PC3, PC10, PC11, PC12
+    PC4, PC5, PB5, PC0, PC1, PC2, PC3, PC10, PC11, PC12
 };
 static const size_t NUM_ZENER_EN = sizeof(CANDIDATE_ZENER_EN) / sizeof(CANDIDATE_ZENER_EN[0]);
+
+// ============================================================================
+// PROGRAMMABLE SIGNAL GENERATOR ENGINE (PB8 - TIM4_CH3)
+// ============================================================================
+static const uint32_t SIGGEN_PRESETS[] = {
+    100, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000
+};
+static const uint8_t NUM_SIGGEN_PRESETS = sizeof(SIGGEN_PRESETS) / sizeof(SIGGEN_PRESETS[0]);
+static uint8_t siggen_idx = 2; // Default 1000 Hz (1.0 kHz)
+static bool siggen_on = false;
+
+static void update_siggen() {
+    if (siggen_on) {
+        tone(PIN_SIGGEN, SIGGEN_PRESETS[siggen_idx]);
+    } else {
+        noTone(PIN_SIGGEN);
+        pinMode(PIN_SIGGEN, OUTPUT);
+        digitalWrite(PIN_SIGGEN, LOW);
+    }
+}
+
+// ============================================================================
+// BATTERY & SMA EXTERNAL VOLTAGE SAMPLER (PA2 & PA6)
+// ============================================================================
+static uint32_t read_vcc_mv();
+
+static uint32_t sample_battery_mv() {
+    uint32_t vcc = read_vcc_mv();
+    uint32_t raw = adc_read_value(PA_2, 12);
+    // 2:1 hardware divider: Vbatt = Vadc * 2
+    uint32_t vadc = (raw * vcc) / 4095;
+    return vadc * 2;
+}
+
+static uint32_t sample_sma_mv() {
+    uint32_t vcc = read_vcc_mv();
+    uint32_t raw = adc_read_value(PA_6, 12);
+    return (raw * vcc) / 4095;
+}
+
+// Instrument Modes: 0 = Tester, 1 = IR Decoder, 2 = Zener, 3 = SigGen & Voltmeter
+static uint8_t instrument_mode = 0;
 
 // ============================================================================
 // AUDIO GENERATOR ENGINE
@@ -710,11 +755,11 @@ static bool probe_1wire_device(uint8_t gnd_idx, uint8_t dq_idx, uint8_t vdd_idx)
     digitalWrite(PROBES[vdd_idx].pin_direct, HIGH);
 
     uint32_t dq_pin = PROBES[dq_idx].pin_direct;
-    pinMode(PROBES[dq_idx].pin_rl, INPUT);
-    pinMode(PROBES[dq_idx].pin_rh, INPUT);
+    pinMode(PROBES[dq_idx].pin_rl, INPUT_PULLUP);
+    pinMode(PROBES[dq_idx].pin_rh, INPUT_PULLUP);
     onewire_release(dq_pin);
 
-    delay(10); // Power-on settle
+    delay(30); // Power-on settle for DS18B20 internal logic (25-30ms required)
 
     if (!onewire_reset_pulse(dq_pin)) {
         release_probes();
@@ -876,16 +921,31 @@ static void run_component_test() {
 
     // ------------------------------------------------------------------------
     // STAGE 0: PROBE DIGITAL SENSORS (DS18B20 1-WIRE & DHT11 / DHT22)
+    // Scan all 6 permutations across socket terminals 1-2-3
     // ------------------------------------------------------------------------
-    if (probe_1wire_device(0, 1, 2) || probe_1wire_device(2, 1, 0) ||
-        probe_1wire_device(1, 0, 2) || probe_1wire_device(1, 2, 0)) {
-        release_probes();
-        return;
+    static const uint8_t SENSOR_PERMS[6][3] = {
+        {0, 1, 2}, // 1:GND 2:DQ  3:VDD
+        {2, 1, 0}, // 3:GND 2:DQ  1:VDD
+        {1, 0, 2}, // 2:GND 1:DQ  3:VDD
+        {1, 2, 0}, // 2:GND 3:DQ  1:VDD
+        {0, 2, 1}, // 1:GND 3:DQ  2:VDD
+        {2, 0, 1}  // 3:GND 1:DQ  2:VDD
+    };
+
+    rtt.println(">> [TESTER] Probing 1-Wire DS18B20 across 6 socket permutations...");
+    for (uint8_t p = 0; p < 6; p++) {
+        if (probe_1wire_device(SENSOR_PERMS[p][0], SENSOR_PERMS[p][1], SENSOR_PERMS[p][2])) {
+            release_probes();
+            return;
+        }
     }
 
-    if (probe_dht_sensor(0, 1, 2) || probe_dht_sensor(2, 1, 0)) {
-        release_probes();
-        return;
+    rtt.println(">> [TESTER] Probing DHT11 / DHT22 across 6 socket permutations...");
+    for (uint8_t p = 0; p < 6; p++) {
+        if (probe_dht_sensor(SENSOR_PERMS[p][0], SENSOR_PERMS[p][1], SENSOR_PERMS[p][2])) {
+            release_probes();
+            return;
+        }
     }
 
     // ------------------------------------------------------------------------
@@ -1215,14 +1275,18 @@ void setup() {
     SerialUART1.begin(38400);
 #endif
 
-    // Also initialize Serial on PA2 (USART2_TX, half-duplex so PA3 is untouched for Socket 1 ADC)
-    Serial.setTx(PA2);
-    Serial.setRx(NC);
-    Serial.begin(38400);
-
     // Initialize Zener boost & ADC sensor
     zener_init_probe();
     sample_zener();
+
+    // Probe PA2 (Battery sense) and PA6 (External voltage / resistance tap)
+    uint32_t vcc_boot = read_vcc_mv();
+    uint32_t raw_pa2 = adc_read_value(PA_2, 12);
+    uint32_t mv_pa2 = (raw_pa2 * vcc_boot) / 4095;
+    uint32_t raw_pa6 = adc_read_value(PA_6, 12);
+    uint32_t mv_pa6 = (raw_pa6 * vcc_boot) / 4095;
+    rtt.printf(">> [ANALOG PROBE] PA2: %lu mV (raw %lu) | PA6: %lu mV (raw %lu) | VCC: %lu mV\n",
+               mv_pa2, raw_pa2, mv_pa6, raw_pa6, vcc_boot);
 
     rtt.println("\n\n========================================================");
     rtt.println("   FNIRSI DSO-TC2 COMPLETE HARDWARE ENGINE ONLINE       ");
@@ -1289,12 +1353,73 @@ void loop() {
         }
     }
 
-    // Run Component Test & Zener Sample: Press TEST / HOLD (PA8) without MENU
-    static uint32_t last_test_run = 0;
-    if (b_test && !b_menu && (millis() - last_test_run > 500)) {
-        last_test_run = millis();
-        run_component_test();
-        sample_zener();
+    // Menu navigation: Switch instruments (0 = Tester, 1 = IR Decoder, 2 = Zener, 3 = SigGen & Voltmeter)
+    static bool prev_b_menu = false;
+    bool menu_pressed = b_menu && !prev_b_menu;
+    prev_b_menu = b_menu;
+
+    if (menu_pressed) {
+        instrument_mode = (instrument_mode + 1) % 4;
+        beep_square(3200, 20);
+        rtt.printf(">> [INSTRUMENT SWITCH] Mode: %u\n", instrument_mode);
+    }
+
+    // Instrument-specific actions for TEST, UP, DOWN
+    static bool prev_b_test = false;
+    static bool prev_b_up = false;
+    static bool prev_b_down = false;
+    bool test_pressed = b_test && !prev_b_test;
+    bool up_pressed   = b_up   && !prev_b_up;
+    bool down_pressed = b_down && !prev_b_down;
+    prev_b_test = b_test;
+    prev_b_up   = b_up;
+    prev_b_down = b_down;
+
+    if (!b_menu) {
+        if (instrument_mode == 0) { // TESTER
+            if (test_pressed) {
+                run_component_test();
+                sample_zener();
+            }
+        } else if (instrument_mode == 1) { // IR DECODER
+            if (test_pressed) {
+                ir_data.has_new = false;
+                ir_data.raw_code = 0;
+                ir_data.repeat_count = 0;
+                beep_square(2400, 20);
+                rtt.println(">> [IR DECODER] Cleared buffer on TEST press.");
+            }
+        } else if (instrument_mode == 2) { // ZENER
+            if (test_pressed) {
+                sample_zener();
+                beep_square(2800, 25);
+                rtt.printf(">> [ZENER] Sample triggered: %lu mV (%s)\n", zener_res.zener_mv, zener_res.status);
+            }
+        } else if (instrument_mode == 3) { // SIGGEN & VOLTMETER
+            if (test_pressed) {
+                siggen_on = !siggen_on;
+                update_siggen();
+                beep_square(siggen_on ? 3600 : 1800, 30);
+                rtt.printf(">> [SIGGEN PB8] Output: %s (%lu Hz)\n",
+                           siggen_on ? "ON" : "OFF", SIGGEN_PRESETS[siggen_idx]);
+            }
+            if (up_pressed) {
+                if (siggen_idx < NUM_SIGGEN_PRESETS - 1) {
+                    siggen_idx++;
+                    update_siggen();
+                    beep_square(3200, 15);
+                    rtt.printf(">> [SIGGEN PB8] Frequency UP -> %lu Hz\n", SIGGEN_PRESETS[siggen_idx]);
+                }
+            }
+            if (down_pressed) {
+                if (siggen_idx > 0) {
+                    siggen_idx--;
+                    update_siggen();
+                    beep_square(2200, 15);
+                    rtt.printf(">> [SIGGEN PB8] Frequency DOWN -> %lu Hz\n", SIGGEN_PRESETS[siggen_idx]);
+                }
+            }
+        }
     }
 
     // Soft Power-Off: Hold POWER for > 1.5 seconds
@@ -1400,25 +1525,29 @@ void loop() {
         prev_ir_total = ir_edge_count;
     }
 
-    // High-Speed Telemetry: 20 Hz periodic OR Instant on key change (115,200 baud)
+    // High-Speed Telemetry: 12.5 Hz periodic (80ms) OR Instant on key change (38,400 baud)
     static uint32_t last_tx = 0;
     static uint32_t seq = 0;
 
-    if (key_changed || (millis() - last_tx >= 50)) {
+    if (key_changed || (millis() - last_tx >= 80)) {
         last_tx = millis();
         seq++;
         uint32_t vcc = read_vcc_mv();
+        uint16_t batt_mv = (uint16_t)sample_battery_mv();
+        uint16_t sma_mv  = (uint16_t)sample_sma_mv();
 
-        char buf[192];
-        snprintf(buf, sizeof(buf), "#TC2:%lu,%s,%s,%02X,%u,%lu,%lu,%s,%s,%s,%u,%u,%u,%lu,%s\n",
+        char buf[224];
+        snprintf(buf, sizeof(buf), "#TC2:%lu,%s,%s,%02X,%u,%lu,%lu,%s,%s,%s,%u,%u,%u,%lu,%s,%u,%u,%lu,%u,%u\n",
                  seq, active_btn, active_pin, btn_mask, backlight_level, vcc, millis(),
                  comp_res.type, comp_res.value, comp_res.pinout,
                  comp_res.s1_mv, comp_res.s2_mv, comp_res.s3_mv,
-                 zener_res.zener_mv, zener_res.status);
+                 zener_res.zener_mv, zener_res.status,
+                 batt_mv, sma_mv,
+                 SIGGEN_PRESETS[siggen_idx], (unsigned int)(siggen_on ? 1 : 0),
+                 (unsigned int)instrument_mode);
 
 #if defined(USART1)
         SerialUART1.print(buf);
 #endif
-        Serial.print(buf);
     }
 }

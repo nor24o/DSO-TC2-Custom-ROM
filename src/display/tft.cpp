@@ -271,6 +271,27 @@ void tft_draw_char(int16_t x, int16_t y, char c, uint16_t fg, uint16_t bg, uint8
             }
         }
         CS_HIGH();
+    } else if (size == 2) {
+        // High-speed flicker-free burst write for size=2 (16x16 pixels in one window setup)
+        if (x + 16 > TFT_WIDTH || y + 16 > TFT_HEIGHT || x < 0 || y < 0) {
+            return;
+        }
+
+        CS_LOW();
+        set_window(x, y, x + 15, y + 15);
+        DC_HIGH();
+        __asm__ volatile("nop; nop");
+        for (uint8_t r = 0; r < 8; r++) {
+            uint8_t row_bits = font8x8_basic[glyph_idx][r];
+            for (uint8_t repeat_y = 0; repeat_y < 2; repeat_y++) {
+                for (uint8_t col = 0; col < 8; col++) {
+                    uint16_t c_color = (row_bits & (1 << (7 - col))) ? fg : bg;
+                    write_bus_16(c_color);
+                    write_bus_16(c_color);
+                }
+            }
+        }
+        CS_HIGH();
     } else {
         for (uint8_t r = 0; r < 8; r++) {
             uint8_t row_bits = font8x8_basic[glyph_idx][r];
