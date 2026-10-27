@@ -10,10 +10,17 @@ An open-source, ultra-high-performance Custom ROM and reverse-engineering framew
 
 ---
 
-## 📷 Photographic Verification
+## 📷 Photographic Verification & Instrument Showcase
 
-![FNIRSI DSO-TC2 Custom ROM Running Live](docs/images/dso_tc2_screen.jpg)
-*Figure 1: FNIRSI DSO-TC2 running the custom graphics engine with crisp text, sub-pixel grid, and live telemetry.*
+| Screen 0: Component & Sensor Tester | Screen 1: 38 kHz IR Remote Decoder | Screen 3: SigGen & SMA Voltmeter |
+| :---: | :---: | :---: |
+| <img src="docs/images/dso_tc2_tester.jpg" width="280" alt="Screen 0: Component Tester"> | <img src="docs/images/dso_tc2_ir_decoder.jpg" width="280" alt="Screen 1: IR Decoder"> | <img src="docs/images/dso_tc2_siggen_volt.jpg" width="280" alt="Screen 3: SigGen & Voltmeter"> |
+| *Karl-Heinz RLC / BJT / MOS & 1-Wire DS18B20* | *NEC / Samsung / Sony Protocol Analyzer* | *100 kHz Waveform Generator & 16V Voltmeter* |
+
+### Hardware Teardown & Reverse-Engineered PCB Architecture
+
+![FNIRSI DSO-TC2 Annotated PCB Teardown](docs/images/dso_tc2_pcb_teardown.png)
+*Figure 2: Complete hardware teardown and component mapping of the FNIRSI DSO-TC2 dual-MCU PCB.*
 
 ---
 

@@ -41,27 +41,57 @@ graph TD
 
 ---
 
-## 2. Dual-Microcontroller Architecture
+---
 
-Teardowns and reverse-engineering reveal that FNIRSI splits the workload between two distinct ARM Cortex-M3 microcontrollers:
+## 2. Hardware Architecture & Annotated PCB Teardown
 
-### Microcontroller 1: MindMotion MM32F103RET6 (LQFP64)
-- **Role**: Component & Transistor Tester Subsystem
-- **Core**: ARM Cortex-M3 @ 72–96 MHz, 512 KB Flash, 64 KB SRAM
+![FNIRSI DSO-TC2 Annotated PCB Teardown](images/dso_tc2_pcb_teardown.png)
+*Figure 2: Complete hardware teardown and component mapping of the FNIRSI DSO-TC2 dual-MCU PCB.*
+
+### Key Integrated Circuit Reference Table
+
+| Ref # | Manufacturer | Part Number | Package | Circuit Function |
+| :---: | :--- | :--- | :---: | :--- |
+| **1** | MindMotion / ST | **MM32F103RET6 / STM32L083RZT6** | LQFP-64 | **MCU 1**: Component tester, RLC matrix, IR decoder, soft power latch, SigGen (`PB8`) |
+| **2** | WCH / ST | **CH32F103C8T6 / STM32F103C6** | LQFP-48 | **MCU 2**: 186 FPS 16-bit parallel TFT graphics engine, oscilloscope fast ADC (`PA0`) |
+| **3** | STMicroelectronics | **TL084C** | SOIC-14 | Quad JFET operational amplifier for analog oscilloscope front-end signal conditioning |
+| **4** | Texas Instruments | **CD4051B** | SOIC-16 | Single 8-channel analog multiplexer / demultiplexer for Karl-Heinz probe switching |
+| **5** | Top Power ASIC | **TP5400** | ESOP-8 | 1A Lithium-Ion battery charger & 5V boost converter management |
+| **6** | Runic | **RS2227XN** | MSOP-10 | Dual DPDT 480 Mbps high-speed analog switch |
+| **7** | Aerosemi | **MT3608** | SOT23-6 | 2A Step-Up DC-DC Boost Converter (generates ~28V high-voltage rail for Zener tests) |
+| **8** | Texas Instruments | **TPS60403** | SOT23-5 | 60 mA charge pump unregulated voltage inverter (generates negative analog rail) |
+| **9** | HXSemi | **HX9193-33GB-N** | SOT23-5 | 300 mA / 3.3V ultra-low-noise LDO regulator for digital & analog rails |
+| **10** | MicrOne | **ME6211C50** | SOT23-5 | 500 mA / 5.0V high-precision LDO voltage regulator |
+| **11** | Runic | **RS0102YH8** | VSSOP-8 | 2-bit bidirectional voltage-level translator for inter-MCU UART link (`PA9`/`PA10`) |
+| **12** | TechPublic | **PSRV05-4MR6T1G** | SOT23-6 | 4-line low-capacitance TVS diode array for USB-C & ESD line protection |
+
+---
+
+## 3. Dual-Microcontroller Functional Split
+
+FNIRSI splits the instrument workload between two microcontrollers connected via the Runic RS0102 level translator at 38,400 baud:
+
+### Microcontroller 1: STM32L083RZT6 (LQFP-64) — System & Measurement Engine
+*(Replaces original factory MindMotion MM32F103RET6)*
+- **Core**: ARM Cortex-M0+ @ 32 MHz, 192 KB Flash, 20 KB SRAM
 - **Functions**:
-  - Ports of Karl-Heinz Kübbeler & Markus Frejek's open-source *TransistorTester* firmware.
-  - Direct connection to the 1-2-3 ZIF socket via precision 680 $\Omega$ and 470 $k\Omega$ resistor networks and Runic RS2227 analog switches.
-  - Controls the 30V step-up boost converter for Zener diode breakdown testing.
-  - Decodes 38 kHz NEC infrared remote signals.
+  - High-precision Karl-Heinz Kübbeler & Markus Frejek component & transistor testing engine.
+  - Direct connection to the 1-2-3 ZIF socket via precision 680 $\Omega$ and 470 $k\Omega$ resistor networks.
+  - Bare-metal Dallas 1-Wire discovery (**DS18B20 / DS18S20 / DS1822**) and single-wire humidity (**DHT11 / DHT22**).
+  - Controls the Aerosemi MT3608 boost converter (`PC4`) for 0–30V Zener breakdown testing.
+  - Hardware EXTI decoder for 38 kHz infrared remote protocols on `PB9`.
+  - 10 Hz – 100 kHz programmable bare-metal `TIM6` signal generator on `PB8`.
+  - External SMA DC voltmeter on `PA6` (0–16V range).
+  - Li-Po battery voltage divider sense on `PA2`.
+  - Active power-hold soft latch on `PB7`.
 
-### Microcontroller 2: WCH CH32F103 / STM32F103C6 (LQFP48) — **Active Target of this Custom ROM**
-- **Role**: Display Controller, Oscilloscope Front-End & Host Interface
+### Microcontroller 2: STM32F103C6 (LQFP-48) — Display Controller & Oscilloscope Front-End
 - **Core**: ARM Cortex-M3 @ 72 MHz, 32 KB Flash, 10 KB SRAM
 - **Functions**:
-  - Directly drives the 2.4-inch 320×240 TFT LCD via an ultra-fast **16-bit 8080 parallel bus**.
+  - Directly drives the 2.4-inch 320×240 TFT LCD via an ultra-fast **16-bit 8080 parallel bus** at **186 FPS**.
   - Acquires analog oscilloscope samples via ADC channel 0 (`PA0`).
   - Manages the USB-C interface (`PA11` / `PA12`).
-  - Communicates with MCU 1 over USART1 (`PA9` TX, `PA10` RX).
+  - Receives live telemetry from MCU 1 over USART1 (`PA10` RX) @ 38,400 baud.
 
 ---
 
