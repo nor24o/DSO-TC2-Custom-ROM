@@ -145,8 +145,9 @@ void tft_init(void) {
     write_cmd(0xC4);
     write_data(0x20);
 
+    // Frame Rate Control in Normal Mode (FRCTRL2): 0x0A = 75 Hz (Flicker-free)
     write_cmd(0xC6);
-    write_data(0x0F);
+    write_data(0x0A);
 
     write_cmd(0xD0);
     write_data(0xA4); write_data(0xA1);

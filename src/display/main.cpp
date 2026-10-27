@@ -588,17 +588,21 @@ void loop() {
             // ================================================================
             // SCREEN 0: HARDWARE CONSOLE & KEYPAD MATRIX
             // ================================================================
-            draw_btn(12, 30, 92, 28, "POWER", "PB13", b_pwr);
-            draw_btn(114, 30, 92, 28, "UP ^", "PC8", b_up);
-            draw_btn(216, 30, 92, 28, "MENU", "PB15", b_menu);
+            static uint8_t prev_m_drawn = 0xFF;
+            if (need_full_redraw || m != prev_m_drawn) {
+                prev_m_drawn = m;
+                draw_btn(12, 30, 92, 28, "POWER", "PB13", b_pwr);
+                draw_btn(114, 30, 92, 28, "UP ^", "PC8", b_up);
+                draw_btn(216, 30, 92, 28, "MENU", "PB15", b_menu);
 
-            draw_btn(12, 64, 92, 28, "OK / <", "PB14", b_ok);
-            draw_btn(114, 64, 92, 28, "RELAY", b_relay ? "ON:PB6" : "OFF:PB6", b_relay);
-            draw_btn(216, 64, 92, 28, "TEST / >", "PA8", b_test);
+                draw_btn(12, 64, 92, 28, "OK / <", "PB14", b_ok);
+                draw_btn(114, 64, 92, 28, "RELAY", b_relay ? "ON:PB6" : "OFF:PB6", b_relay);
+                draw_btn(216, 64, 92, 28, "TEST / >", "PA8", b_test);
 
-            draw_btn(12, 98, 92, 28, "BUZZER", b_buzz ? "ACTIVE" : "PC6", b_buzz);
-            draw_btn(114, 98, 92, 28, "DOWN v", "PC9", b_down);
-            draw_btn(216, 98, 92, 28, "IR RX", b_ir ? "SIGNAL!" : "PB9", b_ir);
+                draw_btn(12, 98, 92, 28, "BUZZER", b_buzz ? "ACTIVE" : "PC6", b_buzz);
+                draw_btn(114, 98, 92, 28, "DOWN v", "PC9", b_down);
+                draw_btn(216, 98, 92, 28, "IR RX", b_ir ? "SIGNAL!" : "PB9", b_ir);
+            }
 
             if (b_pwr) {
                 tft_print(10, 144, ">> POWER: PB13 (Hold 1.5s=Off)  ", COLOR_RED, COLOR_BLACK, 1);
@@ -648,43 +652,61 @@ void loop() {
                 strncpy(prev_pinout, l083_data.comp_pinout, sizeof(prev_pinout) - 1);
             }
 
-            // 2. Component Measurement Text (Left Side ONLY: X: 12..220, Y: 80..132)
-            char val_display[16];
-            if (strcmp(l083_data.comp_type, "NONE") == 0 || strlen(l083_data.comp_type) == 0) {
-                tft_fill_rect(12, 80, 208, 18, COLOR_BLACK);
-                tft_print(16, 81, "READY", COLOR_LIGHTGREY, COLOR_BLACK, 2);
+            // 2. Component Measurement Text (Flicker-free padded printing)
+            static char prev_val_display[24] = "";
+            static char prev_pin_display[28] = "";
+            static char prev_type_display[28] = "";
 
-                tft_fill_rect(12, 102, 208, 14, COLOR_BLACK);
-                tft_print(16, 104, "Insert component in socket", COLOR_YELLOW, COLOR_BLACK, 1);
-
-                tft_fill_rect(12, 118, 208, 14, COLOR_BLACK);
-                tft_print(16, 120, "Press TEST to measure     ", COLOR_GREEN, COLOR_BLACK, 1);
+            bool is_empty = (strcmp(l083_data.comp_type, "NONE") == 0 || strlen(l083_data.comp_type) == 0);
+            if (is_empty) {
+                if (need_full_redraw || strcmp(prev_val_display, "READY") != 0) {
+                    tft_print(16, 81, "READY               ", COLOR_LIGHTGREY, COLOR_BLACK, 2);
+                    tft_print(16, 104, "Insert component in socket", COLOR_YELLOW, COLOR_BLACK, 1);
+                    tft_print(16, 120, "Press TEST to measure     ", COLOR_GREEN, COLOR_BLACK, 1);
+                    strcpy(prev_val_display, "READY");
+                    prev_pin_display[0] = '\0';
+                    prev_type_display[0] = '\0';
+                }
             } else {
-                strncpy(val_display, l083_data.comp_val, 12);
-                val_display[12] = '\0';
-                tft_fill_rect(12, 80, 208, 18, COLOR_BLACK);
-                tft_print(16, 81, val_display, COLOR_YELLOW, COLOR_BLACK, 2);
+                char val_pad[24];
+                snprintf(val_pad, sizeof(val_pad), "%-12s", l083_data.comp_val);
+                if (need_full_redraw || strcmp(prev_val_display, val_pad) != 0) {
+                    tft_print(16, 81, val_pad, COLOR_YELLOW, COLOR_BLACK, 2);
+                    strncpy(prev_val_display, val_pad, sizeof(prev_val_display) - 1);
+                }
 
-                tft_fill_rect(12, 102, 208, 14, COLOR_BLACK);
-                char pin_display[26];
-                snprintf(pin_display, sizeof(pin_display), "%-25s", l083_data.comp_pinout);
-                tft_print(16, 104, pin_display, COLOR_CYAN, COLOR_BLACK, 1);
+                char pin_pad[28];
+                snprintf(pin_pad, sizeof(pin_pad), "%-25s", l083_data.comp_pinout);
+                if (need_full_redraw || strcmp(prev_pin_display, pin_pad) != 0) {
+                    tft_print(16, 104, pin_pad, COLOR_CYAN, COLOR_BLACK, 1);
+                    strncpy(prev_pin_display, pin_pad, sizeof(prev_pin_display) - 1);
+                }
 
-                tft_fill_rect(12, 118, 208, 14, COLOR_BLACK);
-                char type_display[26];
-                snprintf(type_display, sizeof(type_display), "Type: %-19s", l083_data.comp_type);
-                tft_print(16, 120, type_display, COLOR_WHITE, COLOR_BLACK, 1);
+                char type_pad[28];
+                snprintf(type_pad, sizeof(type_pad), "Type: %-19s", l083_data.comp_type);
+                if (need_full_redraw || strcmp(prev_type_display, type_pad) != 0) {
+                    tft_print(16, 120, type_pad, COLOR_WHITE, COLOR_BLACK, 1);
+                    strncpy(prev_type_display, type_pad, sizeof(prev_type_display) - 1);
+                }
             }
 
-            // Bottom Card: Socket Terminals & Voltage Readings (Y: 138..236)
-            snprintf(buf, sizeof(buf), "%4u mV", l083_data.s1_mv);
-            draw_btn(10, 144, 94, 34, "PIN 1: PA3", buf, (l083_data.s1_mv > 100));
-
-            snprintf(buf, sizeof(buf), "%4u mV", l083_data.s2_mv);
-            draw_btn(112, 144, 94, 34, "PIN 2: PA4", buf, (l083_data.s2_mv > 100));
-
-            snprintf(buf, sizeof(buf), "%4u mV", l083_data.s3_mv);
-            draw_btn(214, 144, 94, 34, "PIN 3: PA5", buf, (l083_data.s3_mv > 100));
+            // Bottom Card: Socket Terminals & Voltage Readings (Differential redraw)
+            static uint16_t prev_s1 = 9999, prev_s2 = 9999, prev_s3 = 9999;
+            if (need_full_redraw || abs((int)l083_data.s1_mv - (int)prev_s1) > 50) {
+                snprintf(buf, sizeof(buf), "%4u mV", l083_data.s1_mv);
+                draw_btn(10, 144, 94, 34, "PIN 1: PA3", buf, (l083_data.s1_mv > 100));
+                prev_s1 = l083_data.s1_mv;
+            }
+            if (need_full_redraw || abs((int)l083_data.s2_mv - (int)prev_s2) > 50) {
+                snprintf(buf, sizeof(buf), "%4u mV", l083_data.s2_mv);
+                draw_btn(112, 144, 94, 34, "PIN 2: PA4", buf, (l083_data.s2_mv > 100));
+                prev_s2 = l083_data.s2_mv;
+            }
+            if (need_full_redraw || abs((int)l083_data.s3_mv - (int)prev_s3) > 50) {
+                snprintf(buf, sizeof(buf), "%4u mV", l083_data.s3_mv);
+                draw_btn(214, 144, 94, 34, "PIN 3: PA5", buf, (l083_data.s3_mv > 100));
+                prev_s3 = l083_data.s3_mv;
+            }
 
             // Status lines inside Card 2
             tft_print(12, 184, "RL: 680R (PA7,PB1,PB10) | RH: 470k", COLOR_YELLOW, COLOR_BLACK, 1);
@@ -800,12 +822,14 @@ void loop() {
             // SCREEN 3: HIGH-VOLTAGE ZENER DIODE TESTER (0-30V)
             // ================================================================
             static uint32_t prev_zm = 999999;
-            static bool prev_redraw_zener = true;
+            static char prev_zstat[24] = "";
 
-            if (abs((long)l083_data.zener_mv - (long)prev_zm) > 80 || need_full_redraw || prev_redraw_zener) {
+            if (abs((long)l083_data.zener_mv - (long)prev_zm) > 200 || 
+                strcmp(l083_data.zener_status, prev_zstat) != 0 || 
+                need_full_redraw) {
                 draw_zener_graphic(l083_data.zener_mv, l083_data.zener_status);
                 prev_zm = l083_data.zener_mv;
-                prev_redraw_zener = false;
+                strncpy(prev_zstat, l083_data.zener_status, sizeof(prev_zstat) - 1);
             }
 
             // Card 2: Zener Breakdown Details (Y: 138..236)
