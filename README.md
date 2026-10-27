@@ -1,129 +1,85 @@
 # FNIRSI DSO-TC2 High-Performance Custom ROM
 
 [![PlatformIO](https://img.shields.io/badge/PlatformIO-Compatible-orange?logo=platformio)](https://platformio.org/)
-[![Target MCU](https://img.shields.io/badge/MCU-STM32F103C6%20%2F%20CH32F103-blue?logo=stmicroelectronics)](https://www.st.com/en/microcontrollers-microprocessors/stm32f103c6.html)
+[![Display MCU](https://img.shields.io/badge/Display%20MCU-STM32F103C6-blue?logo=stmicroelectronics)](https://www.st.com/en/microcontrollers-microprocessors/stm32f103c6.html)
+[![Tester MCU](https://img.shields.io/badge/Tester%20MCU-STM32L083RZ-green?logo=stmicroelectronics)](https://www.st.com/en/microcontrollers-microprocessors/stm32l083rz.html)
 [![Display Refresh](https://img.shields.io/badge/Display%20Engine-186%20FPS-brightgreen)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-An open-source, ultra-high-performance Custom ROM and reverse-engineering framework for the **FNIRSI DSO-TC2** handheld multi-function instrument (Oscilloscope, Transistor / Component Tester, and Signal Generator).
+An open-source, ultra-high-performance Custom ROM and reverse-engineering framework for the **FNIRSI DSO-TC2** handheld multi-function test instrument (Oscilloscope, Graphical Transistor / Component Tester, and 38 kHz Infrared Remote Protocol Decoder).
 
 ---
 
 ## 📷 Photographic Verification
 
 ![FNIRSI DSO-TC2 Custom ROM Running Live](docs/images/dso_tc2_screen.jpg)
-*Figure 1: FNIRSI DSO-TC2 running the custom graphics engine with crisp text, sub-pixel grid, and live ADC telemetry.*
+*Figure 1: FNIRSI DSO-TC2 running the custom graphics engine with crisp text, sub-pixel grid, and live telemetry.*
 
 ---
 
 ## 🚀 Key Features
 
-- **Blazing Fast Display Engine (186 FPS)**:
-  - Direct 16-bit 8080-II parallel bus driver using direct register manipulation (`GPIOB->ODR`, `GPIOC->BSRR/BRR`).
-  - Cycle-exact inline assembly write strobing (`PC14`) respecting the STM32 RTC power domain pin slew rates.
-  - Differential bounding-span column rendering—updates moving waveforms and telemetry with zero ghosting and zero leftover pixels.
-- **Hardware Architecture Reverse-Engineered**:
-  - Full pinout mapping for all 48 pins of the main display/oscilloscope MCU.
-  - Discovery of the dual-MCU architecture (MindMotion MM32F103 + WCH CH32F103 / STM32F103).
-  - Inter-MCU serial communication link identified on `PA9` (TX) and `PA10` (RX).
-- **Component Tester Diagnostic & Pin Explorer**:
-  - Live 20 Hz telemetry scanning of all 7 ADC channels (`PA0` through `PA6`).
-  - Automatic change detection on the 1-2-3 test socket taps (`PA4`, `PA5`, `PA6`).
-  - Front-panel keypad monitor.
-- **Support for Aftermarket Replacement Chips**:
-  - Optimized for soldered STM32F103C6 / CH32F103 chips with **10 KB SRAM** and **32 KB Flash**.
-  - Correct stack pointer placement preventing immediate HardFaults observed with standard C8 configurations.
-- **One-Click Flash & Run Tooling**:
-  - Python flashing utility using `AIRCR.VECTRESET` soft resets, bypassing the board's missing hardware `NRST` pin.
+- **Dual-MCU Distributed Architecture**:
+  - **Tester MCU (`STM32L083RZT6`, LQFP-64)**: Manages the 6-button physical panel, soft power latch (`PB7`), LCD backlight PWM (`PC7`), audio piezo engine (`PC6`), oscilloscope input relay (`PB6`), 38 kHz IR demodulator (`PB9`), and Karl-Heinz style 1-2-3 component tester matrix.
+  - **Display MCU (`STM32F103C6`, LQFP-48)**: Drives the 2.4" 320×240 TFT LCD via direct 16-bit 8080 parallel bus at **186 Frames Per Second (FPS)**.
+  - **Synchronized Telemetry Link**: Robust 38,400-baud UART protocol (`PA9`/`PA10` + redundant `PA2`) streaming real-time component measurements, remote codes, button presses, and system health.
+- **Graphical Component Tester (Screen 1)**:
+  - **Full Multi-Junction Analysis**: Automatic detection and pinout identification for BJTs (**NPN** / **PNP**), MOSFETs (**N-Channel** / **P-Channel** with body diode verification), and diodes with exact forward voltage $V_f$.
+  - **True Capacitor vs. Resistor Discrimination**: Multi-sample decay filtering prevents capacitive charge transients from being falsely identified as 1.6 M$\Omega$ resistors. Accurately measures from pF up to thousands of µF.
+  - **Real-Time Schematic Symbols**: Dynamic electronic schematic glyphs (BJT, MOSFET, Diode, Resistor, Capacitor) with active pin badges ($B, C, E, G, D, S, A, K$) and visual 3-pin ZIF socket highlights.
+- **Dedicated 38 kHz IR Remote Protocol Decoder (Screen 2)**:
+  - Hardware EXTI timer engine decoding NEC, Samsung, and Sony pulse-distance encoded protocols.
+  - Clean non-overlapping display dashboard: Size-2 Command Hex/Dec, 16-bit Address, 32-bit Raw code, dynamic 32-bit bitstream visualizer, and live 3-key history log.
+- **Physical Keypad & Power Management**:
+  - 6 physical buttons mapped: `POWER` (`PB13`), `OK / <` (`PB14`), `MENU / AUTO` (`PB15`), `UP / ^` (`PC8`), `DOWN / v` (`PC9`), and `TEST / >` (`PA8`).
+  - Active power-hold soft latch (`PB7 = HIGH` on boot; hold POWER > 1.5s for graceful shutdown).
+  - Backlight dimming (`MENU + UP/DOWN`) and relay toggle (`MENU + TEST`).
 
 ---
 
-## 🔬 Reverse-Engineering Discoveries
+## 📌 Complete Pinout & Hardware Architecture
 
-### 1. Normally-White (TN) Panel Inversion Fix
-The 2.4-inch 320×240 TFT LCD on the DSO-TC2 is a **Normally White (TN)** panel:
-- Standard ST7789 libraries issue command `0x21` (`INVON`), which inverts every pixel, turning black backgrounds bright white and yellow traces dark blue.
-- **The Fix**: The initialization sequence explicitly issues `0x20` (`INVOFF`). Black renders at `0x0000`, white at `0xFFFF`, and colors match true RGB565 values.
+Complete hardware schematics, ASCII wiring diagrams, and pin assignments are documented in:
+👉 **[docs/PINOUT.md](docs/PINOUT.md)** (Full pin tables and graphical schemes for both MCUs)  
+👉 **[docs/HARDWARE.md](docs/HARDWARE.md)** (Reverse engineering findings, circuit theory, and power design)
 
-### 2. Dual-Wired Bit 0 (`D0` on `PA7` & `PB0`)
-The PCB routes data bit 0 to both `PB0` and `PA7`. The firmware drives both pins synchronously during parallel bus transfers to ensure signal integrity across revisions.
+### Quick Pin Summary
 
-### 3. Missing NRST Pin on SWD Header
-The SWD header on the PCB exposes only `3.3V`, `GND`, `SWDIO` (`PA13`), and `SWCLK` (`PA14`). Because hardware reset is not connected:
-- Standard J-Link / ST-Link uploads time out trying to pull `NRST`.
-- **The Fix**: All scripts use `AIRCR.VECTRESET` (`RSetType 1` in SEGGER J-Link), executing instantaneous software core resets.
-
----
-
-## 📌 Complete Pin Assignment (LQFP48)
-
-| Signal / Role | MCU Pins | Description |
-| :--- | :--- | :--- |
-| **TFT Data Bus (16-bit)** | `PB0` – `PB15`, `PA7` | 16-bit parallel 8080 data bus (`D0` to `D15`) |
-| **TFT Control Lines** | `PC13` (`DCX`), `PC14` (`WRX`), `PC15` (`RDX`), `PA8` (`RESX`), `PA15` (`CSX`) | Hardware control strobes |
-| **Clock & Debug** | `PD0`/`PD1` (8 MHz Crystal), `PA13` (`SWDIO`), `PA14` (`SWCLK`) | System clock and SWD programming |
-| **Oscilloscope Input** | `PA0` (ADC Channel 0) | MCX probe input via analog buffer |
-| **Signal Generator** | `PA1` (ADC1 / Timer 2 CH2) | PWM / waveform output |
-| **Battery Monitor** | `PA2` (ADC Channel 2) | Battery voltage divider |
-| **Front Keypad** | `PA3` (ADC Channel 3) | Analog resistor ladder for buttons |
-| **Test Socket 1-2-3** | `PA4`, `PA5`, `PA6` | ZIF socket analog sense lines |
-| **Inter-MCU Link** | `PA9` (TX), `PA10` (RX) | USART1 serial link to MM32 tester MCU |
-| **USB-C Interface** | `PA11` (D-), `PA12` (D+) | Virtual disk bootloader / USB communication |
-
-*For complete details, see [docs/PINOUT.md](docs/PINOUT.md).*
+| Subsystem | MCU | Active Pins | Function |
+| :--- | :---: | :---: | :--- |
+| **TFT 16-Bit Parallel Bus** | STM32F103C6 | `PB0..PB15`, `PA7` | 16-bit data bus (`D0`..`D15`) |
+| **TFT Control Strobes** | STM32F103C6 | `PC13` (`DCX`), `PC14` (`WRX`), `PC15` (`RDX`), `PA15` (`CSX`), `PA8` (`RESX`) | Bus timing & command select |
+| **Inter-MCU UART** | Both | `PA9` (TX) $\leftrightarrow$ `PA10` (RX), `PA2` (redundant) | 38,400 baud packet protocol |
+| **1-2-3 Socket ADC Sense**| STM32L083RZ | `PA3` (Pin 1), `PA4` (Pin 2), `PA5` (Pin 3) | 12-bit analog voltage taps |
+| **680 $\Omega$ Low Probes** | STM32L083RZ | `PA7` ($R_{L1}$), `PB1` ($R_{L2}$), `PB10` ($R_{L3}$) | Low-range resistance/capacitance probes |
+| **470 k$\Omega$ High Probes**| STM32L083RZ| `PB0` ($R_{H1}$), `PB2` ($R_{H2}$), `PB11` ($R_{H3}$) | High-range resistance/capacitance probes |
+| **6-Button Front Panel** | STM32L083RZ | `PB13`, `PB14`, `PB15`, `PC8`, `PC9`, `PA8` | Active LOW navigation keys |
+| **System Peripherals** | STM32L083RZ | `PB7` (Power Latch), `PC7` (Backlight), `PC6` (Buzzer), `PB6` (Relay), `PB9` (IR Rx) | Board control & audio |
 
 ---
 
-## 🛠️ Building & Flashing
+## 🛠️ Building & Dual-MCU Flashing
 
 ### Prerequisites
-1. [PlatformIO CLI](https://platformio.org/) or VSCode with the PlatformIO extension.
-2. [SEGGER J-Link Software](https://www.segger.com/downloads/jlink/) (connected to the DSO-TC2 SWD header).
-3. Python 3.8+.
+1. [PlatformIO CLI](https://platformio.org/) or VSCode with PlatformIO.
+2. [SEGGER J-Link](https://www.segger.com/downloads/jlink/) (connected to the STM32L083 SWD header).
+3. CMSIS-DAP / DAPLink (connected to the STM32F103 SWD header).
+4. Python 3.8+.
 
-### 1. Build the Firmware
+### Compile Both Targets
 ```bash
 pio run
 ```
 
-### 2. Flash and Run in One Step
+### Flash Both MCUs in One Automated Step
 ```bash
-python tools/flash.py
+python tools/pylink_autoflash.py
 ```
-*This compiles the binary, uploads it to address `0x08000000`, triggers an `AIRCR.VECTRESET`, and resumes execution automatically.*
-
-### 3. View Live Diagnostics (RTT)
-```bash
-python tools/read_rtt.py
-```
-
----
-
-## 📂 Repository Structure
-
-```
-├── docs/
-│   ├── images/
-│   │   └── dso_tc2_screen.jpg      # Photographic verification
-│   ├── HARDWARE.md                 # Complete hardware architecture & dual-MCU details
-│   └── PINOUT.md                   # Full 48-pin microcontroller map
-├── include/
-│   ├── font8x8.h                   # ASCII 8x8 font definition
-│   └── tft.h                       # High-speed TFT driver interface
-├── src/
-│   ├── font8x8.cpp                 # Font rendering routines
-│   ├── main.cpp                    # Active Component Tester Hardware Mapper
-│   └── tft.cpp                     # 186 FPS ST7789 16-bit parallel driver
-├── tools/
-│   ├── flash.py                    # Automated J-Link upload & soft-reset tool
-│   └── read_rtt.py                 # Live SEGGER RTT reader
-├── platformio.ini                  # PlatformIO project configuration
-├── LICENSE                         # MIT License
-└── README.md                       # Main documentation
-```
+*This tool automatically compiles both targets, catches the STM32L083 via Segger J-Link (press the front POWER button to power up), flashes the binary, and immediately proceeds to program the STM32F103 display controller via OpenOCD DAPLink.*
 
 ---
 
 ## 📄 License
 
 This project is licensed under the [MIT License](LICENSE).
+All contributions and custom firmware code copyright (c) 2026 nor24o.

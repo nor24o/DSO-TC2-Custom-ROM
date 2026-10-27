@@ -1,67 +1,249 @@
-# STM32F103C6 / CH32F103 (LQFP48) Complete Pinout Reference
+# FNIRSI DSO-TC2 Complete Dual-MCU Pinout & Hardware Schematic Reference
 
-This document details the exact assignment of all 48 pins of the main microcontroller on the FNIRSI DSO-TC2.
-
-## Pinout Map
-
-| Pin # | Pin Name | Default Function | DSO-TC2 Hardware Connection | Status in Custom ROM |
-| :--- | :--- | :--- | :--- | :--- |
-| **1** | `VBAT` | Backup Power | Connected to `VDD` / 3.3V power rail | Power |
-| **2** | `PC13` | Tamper / RTC / GPIO | LCD `DCX` (Data / Command Select) | **Active (TFT)** |
-| **3** | `PC14` | OSC32_IN / GPIO | LCD `WRX` (Write Strobe Clock) | **Active (TFT)** |
-| **4** | `PC15` | OSC32_OUT / GPIO | LCD `RDX` (Read Strobe Clock, tied High) | **Active (TFT)** |
-| **5** | `PD0` | OSC_IN | 8 MHz Crystal Oscillator Input | **Active (Clock)** |
-| **6** | `PD1` | OSC_OUT | 8 MHz Crystal Oscillator Output | **Active (Clock)** |
-| **7** | `NRST` | Master Reset | Onboard RC filter (not on SWD header) | Reset |
-| **8** | `VSSA` | Analog Ground | System Ground | Ground |
-| **9** | `VDDA` | Analog Power | 3.3V Filtered Analog Rail | Power |
-| **10** | `PA0` | ADC12_IN0 | Oscilloscope MCX Analog Input Buffer | Available / Monitored |
-| **11** | `PA1` | ADC12_IN1 / TIM2_CH2 | Signal Generator / PWM Output | Available / Monitored |
-| **12** | `PA2` | ADC12_IN2 / TIM2_CH3 | Battery Voltage Divider Monitor | Available / Monitored |
-| **13** | `PA3` | ADC12_IN3 / TIM2_CH4 | Front Keypad Resistor Ladder Sense | Available / Monitored |
-| **14** | `PA4` | ADC12_IN4 / SPI1_NSS | Test Socket Pin 1 / Analog Mux Tap | Available / Monitored |
-| **15** | `PA5` | ADC12_IN5 / SPI1_SCK | Test Socket Pin 2 / Analog Mux Tap | Available / Monitored |
-| **16** | `PA6` | ADC12_IN6 / SPI1_MISO | Test Socket Pin 3 / Analog Mux Tap | Available / Monitored |
-| **17** | `PA7` | ADC12_IN7 / SPI1_MOSI | LCD Data Bit 0 (`D0` parallel line) | **Active (TFT)** |
-| **18** | `PB0` | ADC12_IN8 / TIM3_CH3 | LCD Data Bit 0 (`D0`) | **Active (TFT)** |
-| **19** | `PB1` | ADC12_IN9 / TIM3_CH4 | LCD Data Bit 1 (`D1`) | **Active (TFT)** |
-| **20** | `PB2` | BOOT1 / GPIO | LCD Data Bit 2 (`D2`) | **Active (TFT)** |
-| **21** | `PB10` | I2C2_SCL / USART3_TX | LCD Data Bit 10 (`D10`) | **Active (TFT)** |
-| **22** | `PB11` | I2C2_SDA / USART3_RX | LCD Data Bit 11 (`D11`) | **Active (TFT)** |
-| **23** | `VSS_1` | Digital Ground | System Ground | Ground |
-| **24** | `VDD_1` | Digital Power | 3.3V Digital Rail | Power |
-| **25** | `PB12` | SPI2_NSS / TIM1_BKIN | LCD Data Bit 12 (`D12`) | **Active (TFT)** |
-| **26** | `PB13` | SPI2_SCK / TIM1_CH1N | LCD Data Bit 13 (`D13`) | **Active (TFT)** |
-| **27** | `PB14` | SPI2_MISO / TIM1_CH2N | LCD Data Bit 14 (`D14`) | **Active (TFT)** |
-| **28** | `PB15` | SPI2_MOSI / TIM1_CH3N | LCD Data Bit 15 (`D15`) | **Active (TFT)** |
-| **29** | `PA8` | TIM1_CH1 / MCO | LCD `RESX` (Display Hardware Reset) | **Active (TFT)** |
-| **30** | `PA9` | USART1_TX / TIM1_CH2 | Inter-MCU UART TX (to MM32 Tester MCU) | Available / Monitored |
-| **31** | `PA10` | USART1_RX / TIM1_CH3 | Inter-MCU UART RX (from MM32 Tester MCU)| Available / Monitored |
-| **32** | `PA11` | USB_DM / CAN_RX | USB-C D- line (Factory USB Bootloader) | Available / Monitored |
-| **33** | `PA12` | USB_DP / CAN_TX | USB-C D+ line (Factory USB Bootloader) | Available / Monitored |
-| **34** | `PA13` | JTMS / SWDIO | SWD Data (J-Link Debugger) | **Active (SWD)** |
-| **35** | `VSS_2` | Digital Ground | System Ground | Ground |
-| **36** | `VDD_2` | Digital Power | 3.3V Digital Rail | Power |
-| **37** | `PA14` | JTCK / SWCLK | SWD Clock (J-Link Debugger) | **Active (SWD)** |
-| **38** | `PA15` | JTDI / TIM2_CH1 | LCD `CSX` (Display Chip Select) | **Active (TFT)** |
-| **39** | `PB3` | JTDO / TIM2_CH2 | LCD Data Bit 3 (`D3` - JTAG released) | **Active (TFT)** |
-| **40** | `PB4` | NJTRST / TIM3_CH1 | LCD Data Bit 4 (`D4` - JTAG released) | **Active (TFT)** |
-| **41** | `PB5` | I2C1_SMBA / TIM3_CH2 | LCD Data Bit 5 (`D5`) | **Active (TFT)** |
-| **42** | `PB6` | I2C1_SCL / TIM4_CH1 | LCD Data Bit 6 (`D6`) | **Active (TFT)** |
-| **43** | `PB7` | I2C1_SDA / TIM4_CH2 | LCD Data Bit 7 (`D7`) | **Active (TFT)** |
-| **44** | `PB8` | TIM4_CH3 / CAN_RX | LCD Data Bit 8 (`D8`) | **Active (TFT)** |
-| **45** | `PB9` | TIM4_CH4 / CAN_TX | LCD Data Bit 9 (`D9`) | **Active (TFT)** |
-| **46** | `BOOT0` | Boot Config | Pulled to Ground via 10k resistor | Boot |
-| **47** | `VSS_3` | Digital Ground | System Ground | Ground |
-| **48** | `VDD_3` | Digital Power | 3.3V Digital Rail | Power |
+This document provides the definitive, hardware-verified pinout and schematic architecture for both microcontrollers on the FNIRSI DSO-TC2 Custom ROM:
+1. **Tester / System MCU**: `STM32L083RZT6` (ARM Cortex-M0+ @ 32 MHz, LQFP-64) — replaces damaged MindMotion MM32.
+2. **Display / Host MCU**: `STM32F103C6` (ARM Cortex-M3 @ 72 MHz, LQFP-48) — drives the 16-bit parallel TFT.
 
 ---
 
-## Summary Statistics
+## 1. System Interconnection Block Diagram
 
-- **Total Pins**: 48
-- **Power & System Pins**: 11 (`VDD`, `VSS`, `VBAT`, `NRST`, `BOOT0`, `PD0`, `PD1`)
-- **Total GPIOs**: 37
-- **GPIOs Used by Display**: 22 (`PB0..PB15`, `PA7`, `PA8`, `PA15`, `PC13`, `PC14`, `PC15`)
-- **GPIOs Used by SWD Debug**: 2 (`PA13`, `PA14`)
-- **Free / Unused GPIOs Available for Instruments**: **11** (`PA0`–`PA6`, `PA9`–`PA12`)
+```mermaid
+graph TD
+    subgraph PowerSystem ["Power & Peripheral Subsystem"]
+        Batt["3.7V 1500mAh LiPo"] --> PwrReg["3.3V Step-Down DC-DC"]
+        PwrReg --> MCU_L083
+        PwrReg --> MCU_F103
+        PwrReg --> Backlight["2.4' LCD Backlight LED"]
+        PwrReg --> Buzzer["Piezo Sound Generator"]
+        PwrReg --> Relay["Attenuator Switch Relay"]
+    end
+
+    subgraph TesterMCU ["MCU 1: STM32L083RZT6 (LQFP-64) - System & Measurement Engine"]
+        L083_PwrLatch["PB7: Power Latch (Active HIGH)"]
+        L083_BL["PC7: Backlight PWM"]
+        L083_Buzz["PC6: Audio Piezo"]
+        L083_Relay["PB6: Oscilloscope Relay"]
+        L083_IR["PB9: 38kHz IR Demodulator EXTI"]
+        
+        L083_Keys["Buttons (Active LOW):
+        PB13: POWER | PB14: OK (<)
+        PB15: MENU  | PC8:  UP (^)
+        PC9:  DOWN  | PA8:  TEST (>)"]
+        
+        L083_Tester["1-2-3 Component Tester Matrix:
+        Sense: PA3 (S1), PA4 (S2), PA5 (S3)
+        680Ω RL: PA7 (RL1), PB1 (RL2), PB10 (RL3)
+        470kΩ RH: PB0 (RH1), PB2 (RH2), PB11 (RH3)"]
+        
+        L083_TX["PA9: USART1_TX (38400)
+        PA2: USART2_TX (38400)"]
+    end
+
+    subgraph DisplayMCU ["MCU 2: STM32F103C6 (LQFP-48) - 186 FPS Graphics Host"]
+        F103_RX["PA10: USART1_RX (38400)"]
+        F103_ADC["PA0: Scope ADC Input"]
+        
+        F103_LCD_Ctrl["LCD Control:
+        PC13: DCX (RS)
+        PC14: WRX (Write Strobe)
+        PC15: RDX (Tied HIGH)
+        PA15: CSX (Chip Select)
+        PA8:  RESX (Reset)"]
+        
+        F103_LCD_Data["16-Bit Parallel Data Bus:
+        PB0..PB15 (D0..D15) + PA7 (D0 sync)"]
+    end
+
+    subgraph Peripherals ["External Hardware & Sockets"]
+        ZIF["1-2-3 ZIF Socket & SMD Pads"]
+        LCD["2.4' 320x240 ST7789 Color TFT"]
+        IR_Sensor["38kHz Infrared Receiver Diode"]
+        BNC["MCX Oscilloscope Probe Jack"]
+    end
+
+    L083_PwrLatch -.->|Keep Alive| PwrReg
+    L083_BL --> Backlight
+    L083_Buzz --> Buzzer
+    L083_Relay --> Relay
+    IR_Sensor --> L083_IR
+    
+    L083_Tester <==>|RL / RH / Sense| ZIF
+    L083_TX ==>|"Telemetry Link (38,400 baud)"| F103_RX
+    
+    F103_LCD_Ctrl --> LCD
+    F103_LCD_Data ==> LCD
+    BNC --> F103_ADC
+```
+
+---
+
+## 2. Tester MCU: STM32L083RZT6 (LQFP-64) Pinout
+
+### 2.1 Complete Pinout Table
+
+| LQFP-64 Pin # | Pin Name | Peripheral | Hardware Net / Target | Active Status | Description |
+| :---: | :---: | :---: | :---: | :---: | :--- |
+| **16** | `PA2` | `USART2_TX` | Redundant Telemetry Link | **ACTIVE** | Secondary broadcast at 38,400 baud (`RX=NC`) |
+| **17** | `PA3` | `ADC_IN3` | Socket Pin 1 Sense | **ACTIVE** | Direct analog voltage measurement tap |
+| **20** | `PA4` | `ADC_IN4` | Socket Pin 2 Sense | **ACTIVE** | Direct analog voltage measurement tap |
+| **21** | `PA5` | `ADC_IN5` | Socket Pin 3 Sense | **ACTIVE** | Direct analog voltage measurement tap |
+| **23** | `PA7` | `GPIO / RL1`| Socket Pin 1 $680\,\Omega$ | **ACTIVE** | Low-range probe resistor ($R_{L1}$) |
+| **26** | `PB0` | `GPIO / RH1`| Socket Pin 1 $470\,\text{k}\Omega$ | **ACTIVE** | High-range probe resistor ($R_{H1}$) |
+| **27** | `PB1` | `GPIO / RL2`| Socket Pin 2 $680\,\Omega$ | **ACTIVE** | Low-range probe resistor ($R_{L2}$) |
+| **28** | `PB2` | `GPIO / RH2`| Socket Pin 2 $470\,\text{k}\Omega$ | **ACTIVE** | High-range probe resistor ($R_{H2}$) |
+| **29** | `PB10`| `GPIO / RL3`| Socket Pin 3 $680\,\Omega$ | **ACTIVE** | Low-range probe resistor ($R_{L3}$) |
+| **30** | `PB11`| `GPIO / RH3`| Socket Pin 3 $470\,\text{k}\Omega$ | **ACTIVE** | High-range probe resistor ($R_{H3}$) |
+| **34** | `PB13`| `GPIO / EXTI`| Button: **POWER** | **ACTIVE** | Active LOW, internal pull-up. Long press = shutdown |
+| **35** | `PB14`| `GPIO / EXTI`| Button: **OK** / `<` | **ACTIVE** | Active LOW, navigation & confirmation |
+| **36** | `PB15`| `GPIO / EXTI`| Button: **MENU** / `AUTO` | **ACTIVE** | Active LOW, cycles screens & backlight modifier |
+| **37** | `PC6` | `GPIO / PWM`| Buzzer / Piezo Audio | **ACTIVE** | DC pulses + multi-tone feedback (1.2 kHz–4.2 kHz) |
+| **38** | `PC7` | `GPIO / PWM`| LCD Backlight LED | **ACTIVE** | Brightness dimming (30..255) / On-Off |
+| **39** | `PC8` | `GPIO / EXTI`| Button: **UP** / `^` | **ACTIVE** | Active LOW, value increment |
+| **40** | `PC9` | `GPIO / EXTI`| Button: **DOWN** / `v` | **ACTIVE** | Active LOW, value decrement |
+| **41** | `PA8` | `GPIO / EXTI`| Button: **TEST** / `HOLD` / `>`| **ACTIVE** | Active LOW, triggers component test run |
+| **42** | `PA9` | `USART1_TX`| Inter-MCU Primary TX | **ACTIVE** | Transmits telemetry packets to Display MCU @ 38,400 baud |
+| **43** | `PA10`| `USART1_RX`| Inter-MCU Primary RX | **ACTIVE** | Receives commands from Display MCU @ 38,400 baud |
+| **46** | `PA13`| `SWDIO` | SWD Debug Data | **ACTIVE** | Segger J-Link programming pin |
+| **49** | `PA14`| `SWCLK` | SWD Debug Clock | **ACTIVE** | Segger J-Link programming clock |
+| **58** | `PB6` | `GPIO` | Oscilloscope Range Relay| **ACTIVE** | Solid-state relay for 1X / 10X input attenuation |
+| **59** | `PB7` | `GPIO` | Power-Hold Soft Latch | **ACTIVE** | Driven HIGH on boot to maintain 3.3V power regulator |
+| **62** | `PB9` | `GPIO / EXTI`| 38 kHz IR Demodulator | **ACTIVE** | Captures NEC / Samsung / Sony pulse-distance codes |
+
+---
+
+### 2.2 Component Tester Resistor Network Architecture
+
+```
+                  STM32L083RZ Pins
+               ----------------------
+               [ PA7 ] ----/\/\/\----+  (680 Ω RL1)
+                            680 Ω    |
+               [ PB0 ] ----/\/\/\----+  (470 kΩ RH1)
+                            470 kΩ   |
+                                     +-----> ZIF Pin 1 (Socket 1)
+               [ PA3 ] --------------+  (Direct ADC Channel 3)
+                                     
+               ----------------------
+               [ PB1 ] ----/\/\/\----+  (680 Ω RL2)
+                            680 Ω    |
+               [ PB2 ] ----/\/\/\----+  (470 kΩ RH2)
+                            470 kΩ   |
+                                     +-----> ZIF Pin 2 (Socket 2)
+               [ PA4 ] --------------+  (Direct ADC Channel 4)
+                                     
+               ----------------------
+               [ PB10] ----/\/\/\----+  (680 Ω RL3)
+                            680 Ω    |
+               [ PB11] ----/\/\/\----+  (470 kΩ RH3)
+                            470 kΩ   |
+                                     +-----> ZIF Pin 3 (Socket 3)
+               [ PA5 ] --------------+  (Direct ADC Channel 5)
+```
+
+---
+
+## 3. Display MCU: STM32F103C6 (LQFP-48) Pinout
+
+### 3.1 Complete Pinout Table
+
+| LQFP-48 Pin # | Pin Name | Default Function | Hardware Net / Connection | Mode / State | Description |
+| :---: | :---: | :---: | :---: | :---: | :--- |
+| **1** | `VBAT` | Backup Power | Tied to 3.3V digital rail | Power | System VDD |
+| **2** | `PC13` | Tamper / RTC | **LCD `DCX` (RS)** | Output | Data / Command Select (LOW=Cmd, HIGH=Data) |
+| **3** | `PC14` | OSC32_IN | **LCD `WRX`** | Output | Write Strobe Clock (Inline assembly cycle) |
+| **4** | `PC15` | OSC32_OUT | **LCD `RDX`** | Output | Read Strobe (Tied permanently HIGH) |
+| **5** | `PD0` | OSC_IN | 8 MHz Crystal Input | Clock | HSE Clock Generator |
+| **6** | `PD1` | OSC_OUT | 8 MHz Crystal Output | Clock | HSE Clock Generator |
+| **7** | `NRST` | Master Reset | Internal RC (unrouted to SWD) | System | Software reset via AIRCR.VECTRESET |
+| **8** | `VSSA` | Analog Ground | System Ground | Power | Clean Analog Ground |
+| **9** | `VDDA` | Analog Power | 3.3V Filtered Rail | Power | Clean Analog VDD |
+| **10** | `PA0` | `ADC12_IN0` | Scope MCX Analog Front-End | Input | High-speed ADC sampling input |
+| **11** | `PA1` | `ADC_IN1 / TIM2` | Signal Generator Output | Reserved | PWM / DAC Waveform Generator |
+| **12** | `PA2` | `ADC_IN2` | Battery Voltage Monitor | Reserved | Battery divider sense |
+| **17** | `PA7` | `GPIO` | **LCD `D0` Parallel Tap** | Output | Synchronously mirrored with `PB0` for bus speed |
+| **18** | `PB0` | `GPIO` | **LCD `D0`** | Output | 16-Bit Parallel Data Bit 0 |
+| **19** | `PB1` | `GPIO` | **LCD `D1`** | Output | 16-Bit Parallel Data Bit 1 |
+| **20** | `PB2` | `BOOT1 / GPIO` | **LCD `D2`** | Output | 16-Bit Parallel Data Bit 2 |
+| **21** | `PB10`| `GPIO` | **LCD `D10`** | Output | 16-Bit Parallel Data Bit 10 |
+| **22** | `PB11`| `GPIO` | **LCD `D11`** | Output | 16-Bit Parallel Data Bit 11 |
+| **25** | `PB12`| `GPIO` | **LCD `D12`** | Output | 16-Bit Parallel Data Bit 12 |
+| **26** | `PB13`| `GPIO` | **LCD `D13`** | Output | 16-Bit Parallel Data Bit 13 |
+| **27** | `PB14`| `GPIO` | **LCD `D14`** | Output | 16-Bit Parallel Data Bit 14 |
+| **28** | `PB15`| `GPIO` | **LCD `D15`** | Output | 16-Bit Parallel Data Bit 15 |
+| **29** | `PA8` | `GPIO` | **LCD `RESX`** | Output | Display Hardware Reset (Active LOW pulse) |
+| **30** | `PA9` | `USART1_TX` | Inter-MCU Link TX | Output | Telemetry / Command TX @ 38,400 baud |
+| **31** | `PA10`| `USART1_RX` | Inter-MCU Link RX | Input | Telemetry RX from L083 Tester @ 38,400 baud |
+| **32** | `PA11`| `USB_DM` | USB-C D- Line | USB | Factory Bootloader / VCP |
+| **33** | `PA12`| `USB_DP` | USB-C D+ Line | USB | Factory Bootloader / VCP |
+| **34** | `PA13`| `JTMS / SWDIO` | DAPLink SWD Data | Debug | OpenOCD programming line |
+| **37** | `PA14`| `JTCK / SWCLK` | DAPLink SWD Clock | Debug | OpenOCD programming clock |
+| **38** | `PA15`| `GPIO` | **LCD `CSX`** | Output | Display Chip Select (Active LOW) |
+| **39** | `PB3` | `GPIO` | **LCD `D3`** | Output | Data Bit 3 (JTAG released via AFIO) |
+| **40** | `PB4` | `GPIO` | **LCD `D4`** | Output | Data Bit 4 (JTAG released via AFIO) |
+| **41** | `PB5` | `GPIO` | **LCD `D5`** | Output | 16-Bit Parallel Data Bit 5 |
+| **42** | `PB6` | `GPIO` | **LCD `D6`** | Output | 16-Bit Parallel Data Bit 6 |
+| **43** | `PB7` | `GPIO` | **LCD `D7`** | Output | 16-Bit Parallel Data Bit 7 |
+| **44** | `PB8` | `GPIO` | **LCD `D8`** | Output | 16-Bit Parallel Data Bit 8 |
+| **45** | `PB9` | `GPIO` | **LCD `D9`** | Output | 16-Bit Parallel Data Bit 9 |
+| **46** | `BOOT0`| `Boot Select` | Pulled to GND | Boot | Default flash boot |
+
+---
+
+### 3.2 Graphical 16-Bit Parallel Display Bus Architecture
+
+```
+                 STM32F103C6                          ST7789 2.4" TFT (320x240)
+              +-----------------+                    +-------------------------+
+              |            PA15 |------------------->| CSX   (Chip Select, Act-L)
+              |            PC13 |------------------->| DCX   (Cmd: 0 / Data: 1)
+              |            PC14 |------------------->| WRX   (Write Clock Strobe)
+              |            PC15 |------------------->| RDX   (Read Tied High 3.3V)
+              |             PA8 |------------------->| RESX  (Reset Pulse, Act-L)
+              |                 |                    |                         |
+              |        PB0, PA7 |===================>| D0    (Data Bit 0)      |
+              |             PB1 |===================>| D1    (Data Bit 1)      |
+              |             PB2 |===================>| D2    (Data Bit 2)      |
+              |             PB3 |===================>| D3    (Data Bit 3)      |
+              |             PB4 |===================>| D4    (Data Bit 4)      |
+              |             PB5 |===================>| D5    (Data Bit 5)      |
+              |             PB6 |===================>| D6    (Data Bit 6)      |
+              |             PB7 |===================>| D7    (Data Bit 7)      |
+              |             PB8 |===================>| D8    (Data Bit 8)      |
+              |             PB9 |===================>| D9    (Data Bit 9)      |
+              |            PB10 |===================>| D10   (Data Bit 10)     |
+              |            PB11 |===================>| D11   (Data Bit 11)     |
+              |            PB12 |===================>| D12   (Data Bit 12)     |
+              |            PB13 |===================>| D13   (Data Bit 13)     |
+              |            PB14 |===================>| D14   (Data Bit 14)     |
+              |            PB15 |===================>| D15   (Data Bit 15)     |
+              +-----------------+                    +-------------------------+
+```
+
+---
+
+## 4. Keypad Pin Assignment & Matrix Map
+
+The front panel buttons connect to the **STM32L083RZ** with internal pull-ups enabled:
+
+```
+                  +-----------------------------------+
+                  |        FNIRSI DSO-TC2 PANEL       |
+                  |                                   |
+                  |          [ UP: PC8 ]              |
+                  |               ^                   |
+                  |   [ < ]               [ > ]       |
+                  | [OK: PB14]          [TEST: PA8]   |
+                  |               v                   |
+                  |         [ DOWN: PC9 ]             |
+                  |                                   |
+                  |    [MENU: PB15]   [POWER: PB13]   |
+                  +-----------------------------------+
+```
+
+- **`PB13` (POWER)**: Short click = audio click; hold > 1.5 s triggers soft power-off sequence (`PB7 = LOW`).
+- **`PB15` (MENU / AUTO)**: Short click toggles active screen (`Component Tester` $\longleftrightarrow$ `IR Remote Decoder` $\longleftrightarrow$ `Console`).
+- **`PB15 + UP / DOWN`**: Controls LCD backlight brightness level (`PC7` PWM).
+- **`PB15 + TEST (PA8)`**: Toggles oscilloscope range relay (`PB6`).
+- **`PA8` (TEST / HOLD)**: Triggers single-shot component measurement in 1-2-3 socket.
+- **`PB9` (IR Receiver)**: Hardware interrupt capture on 38 kHz demodulated remote commands.
