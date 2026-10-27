@@ -2,10 +2,10 @@
  * @file main.cpp
  * @brief FNIRSI DSO-TC2 Master Display & Hardware Console (186 FPS)
  * 
- * Dual Mode Graphical Interface:
- * - Screen 0: Hardware Console & 6-Button Physical Matrix
- * - Screen 1: Dedicated Component Tester Menu & Measurement Console
- * Toggle between screens at any time by pressing MENU (PB15)!
+ * Graphical Component Tester & Hardware Console:
+ * - Real-time schematic component graphics (Resistor, Capacitor, Diode, Short)
+ * - Visual ZIF socket terminal representation with active pin glows
+ * - Dual-screen navigation via MENU button (PB15)
  */
 
 #include <Arduino.h>
@@ -27,8 +27,8 @@ struct L083Telemetry {
     bool connected;
 
     // Component Tester Fields
-    char comp_type[16];   // "NONE", "RESISTOR", "DIODE", "SHORT"
-    char comp_val[24];    // "1.00 kOhm", "Vf=0.68V"
+    char comp_type[16];   // "NONE", "RESISTOR", "DIODE", "CAPACITOR", "SHORT"
+    char comp_val[24];    // "1.00 kOhm", "100.0 nF", "Vf=0.68V"
     char comp_pinout[20]; // "Pins 1 - 2", "1(A) -> 2(K)"
     uint16_t s1_mv;
     uint16_t s2_mv;
@@ -41,8 +41,8 @@ static L083Telemetry l083_data = {
 };
 static char last_raw_pkt[64] = "Waiting for UART...";
 
-// Screen Mode: 0 = Hardware Console, 1 = Component Tester Menu
-static uint8_t screen_mode = 1; // Default to Component Tester!
+// Screen Mode: 0 = Hardware Console, 1 = Graphical Component Tester
+static uint8_t screen_mode = 1;
 static bool need_full_redraw = true;
 
 // Serial Parser
@@ -113,7 +113,7 @@ static void poll_uart() {
     }
 }
 
-// Button Box Widget
+// Widget: Button Box
 static void draw_btn(int16_t x, int16_t y, int16_t w, int16_t h, 
                      const char* label, const char* sublabel, bool active) {
     uint16_t border_col = active ? COLOR_GREEN : COLOR_DARKCYAN;
@@ -131,6 +131,153 @@ static void draw_btn(int16_t x, int16_t y, int16_t w, int16_t h,
         int16_t sx = x + (w - (int16_t)strlen(sublabel) * 8) / 2;
         tft_print(sx, y + 16, sublabel, sub_col, bg_col, 1);
     }
+}
+
+// Placeholder icon when open
+static void tft_draw_circle_placeholder(int16_t cx, int16_t cy) {
+    tft_draw_rect(cx - 14, cy - 14, 28, 28, COLOR_DARKGREY);
+    tft_print(cx - 4, cy - 4, "?", COLOR_YELLOW, COLOR_BLACK, 1);
+}
+
+// Draw Component Schematic Symbol
+static void draw_schematic_graphic(const char* type, const char* pinout) {
+    // Graphic canvas: X: 10..220, Y: 32..74 (Center Y = 53)
+    tft_fill_rect(10, 32, 216, 42, COLOR_BLACK);
+
+    // Extract terminal indices from pinout string (e.g. "Pins 1 - 2", "1(A) -> 2(K)")
+    char pA = '1', pB = '2';
+    if (strstr(pinout, "2 - 3") || strstr(pinout, "2(A) -> 3(K)") || strstr(pinout, "3(A) -> 2(K)")) {
+        pA = '2'; pB = '3';
+    } else if (strstr(pinout, "1 - 3") || strstr(pinout, "1(A) -> 3(K)") || strstr(pinout, "3(A) -> 1(K)")) {
+        pA = '1'; pB = '3';
+    }
+
+    if (strcmp(type, "RESISTOR") == 0) {
+        // Left Terminal Badge
+        tft_fill_rect(12, 42, 22, 22, COLOR_NAVY);
+        tft_draw_rect(12, 42, 22, 22, COLOR_YELLOW);
+        tft_draw_char(19, 46, pA, COLOR_YELLOW, COLOR_NAVY, 1);
+
+        // Left Lead
+        tft_draw_hline(34, 53, 44, COLOR_WHITE);
+
+        // Resistor Body (X: 78..148, W: 70, H: 18)
+        tft_fill_rect(78, 44, 70, 18, 0x5280); // Dark khaki / resistor body
+        tft_draw_rect(78, 44, 70, 18, COLOR_YELLOW);
+
+        // 4 Color Code Bands
+        tft_fill_rect(90,  44, 5, 18, COLOR_MAROON); // Brown
+        tft_fill_rect(104, 44, 5, 18, COLOR_BLACK);  // Black
+        tft_fill_rect(118, 44, 5, 18, COLOR_RED);    // Red
+        tft_fill_rect(134, 44, 5, 18, COLOR_YELLOW); // Gold tolerance
+
+        // Right Lead
+        tft_draw_hline(148, 53, 44, COLOR_WHITE);
+
+        // Right Terminal Badge
+        tft_fill_rect(192, 42, 22, 22, COLOR_NAVY);
+        tft_draw_rect(192, 42, 22, 22, COLOR_YELLOW);
+        tft_draw_char(199, 46, pB, COLOR_YELLOW, COLOR_NAVY, 1);
+
+    } else if (strcmp(type, "CAPACITOR") == 0) {
+        // Left Terminal Badge
+        tft_fill_rect(12, 42, 22, 22, COLOR_NAVY);
+        tft_draw_rect(12, 42, 22, 22, COLOR_CYAN);
+        tft_draw_char(19, 46, pA, COLOR_CYAN, COLOR_NAVY, 1);
+
+        // Left Lead
+        tft_draw_hline(34, 53, 72, COLOR_WHITE);
+
+        // Capacitor Plates (Parallel vertical bars)
+        tft_fill_rect(106, 38, 4, 30, COLOR_CYAN);
+        tft_fill_rect(118, 38, 4, 30, COLOR_CYAN);
+
+        // Dielectric Gap Lines
+        tft_draw_hline(110, 48, 8, COLOR_DARKCYAN);
+        tft_draw_hline(110, 58, 8, COLOR_DARKCYAN);
+
+        // Polarity indicator
+        tft_print(96, 36, "+", COLOR_CYAN, COLOR_BLACK, 1);
+
+        // Right Lead
+        tft_draw_hline(122, 53, 70, COLOR_WHITE);
+
+        // Right Terminal Badge
+        tft_fill_rect(192, 42, 22, 22, COLOR_NAVY);
+        tft_draw_rect(192, 42, 22, 22, COLOR_CYAN);
+        tft_draw_char(199, 46, pB, COLOR_CYAN, COLOR_NAVY, 1);
+
+    } else if (strcmp(type, "DIODE") == 0) {
+        // Anode Terminal Badge
+        tft_fill_rect(12, 42, 22, 22, COLOR_NAVY);
+        tft_draw_rect(12, 42, 22, 22, COLOR_GREEN);
+        tft_draw_char(19, 46, pA, COLOR_GREEN, COLOR_NAVY, 1);
+
+        // Anode Lead
+        tft_draw_hline(34, 53, 62, COLOR_WHITE);
+
+        // Diode Triangle (Anode pointing right towards cathode)
+        for (int i = 0; i <= 18; i++) {
+            int16_t h = (i * 20) / 18;
+            tft_draw_vline(96 + i, 53 - h / 2, h, COLOR_GREEN);
+        }
+
+        // Cathode Vertical Bar
+        tft_fill_rect(116, 40, 4, 26, COLOR_GREEN);
+
+        // LED Emission Rays
+        tft_draw_line(110, 36, 120, 26, COLOR_YELLOW);
+        tft_draw_line(116, 36, 126, 26, COLOR_YELLOW);
+
+        // Cathode Lead
+        tft_draw_hline(120, 53, 72, COLOR_WHITE);
+
+        // Cathode Terminal Badge
+        tft_fill_rect(192, 42, 22, 22, COLOR_NAVY);
+        tft_draw_rect(192, 42, 22, 22, COLOR_GREEN);
+        tft_draw_char(199, 46, pB, COLOR_GREEN, COLOR_NAVY, 1);
+
+    } else if (strcmp(type, "SHORT") == 0) {
+        // Left Badge
+        tft_fill_rect(12, 42, 22, 22, COLOR_NAVY);
+        tft_draw_rect(12, 42, 22, 22, COLOR_RED);
+        tft_draw_char(19, 46, pA, COLOR_RED, COLOR_NAVY, 1);
+
+        // Solid Glowing Continuity Wire
+        tft_fill_rect(34, 51, 158, 5, COLOR_RED);
+        tft_print(82, 38, "[ SHORT ]", COLOR_YELLOW, COLOR_BLACK, 1);
+
+        // Right Badge
+        tft_fill_rect(192, 42, 22, 22, COLOR_NAVY);
+        tft_draw_rect(192, 42, 22, 22, COLOR_RED);
+        tft_draw_char(199, 46, pB, COLOR_RED, COLOR_NAVY, 1);
+
+    } else {
+        // Idle: Open Leads with question mark
+        tft_draw_hline(16, 53, 60, COLOR_DARKGREY);
+        tft_draw_circle_placeholder(113, 53);
+        tft_draw_hline(150, 53, 60, COLOR_DARKGREY);
+        tft_print(74, 38, "[ OPEN LEADS ]", COLOR_LIGHTGREY, COLOR_BLACK, 1);
+    }
+
+    // Mini Visual ZIF Socket Block (X: 230..308, Y: 32..120)
+    tft_fill_rect(230, 32, 78, 88, 0x18C3); // Dark teal socket base
+    tft_draw_rect(230, 32, 78, 88, COLOR_CYAN);
+    tft_fill_rect(232, 34, 10, 84, 0x001F); // Blue locking lever
+
+    // 3 Pin Holes
+    bool s1_act = (pA == '1' || pB == '1');
+    bool s2_act = (pA == '2' || pB == '2');
+    bool s3_act = (pA == '3' || pB == '3');
+
+    tft_fill_rect(250, 42, 52, 18, s1_act ? COLOR_GREEN : COLOR_BLACK);
+    tft_print(254, 46, s1_act ? "*PIN 1*" : " PIN 1 ", s1_act ? COLOR_BLACK : COLOR_WHITE, s1_act ? COLOR_GREEN : COLOR_BLACK, 1);
+
+    tft_fill_rect(250, 66, 52, 18, s2_act ? COLOR_GREEN : COLOR_BLACK);
+    tft_print(254, 70, s2_act ? "*PIN 2*" : " PIN 2 ", s2_act ? COLOR_BLACK : COLOR_WHITE, s2_act ? COLOR_GREEN : COLOR_BLACK, 1);
+
+    tft_fill_rect(250, 90, 52, 18, s3_act ? COLOR_GREEN : COLOR_BLACK);
+    tft_print(254, 94, s3_act ? "*PIN 3*" : " PIN 3 ", s3_act ? COLOR_BLACK : COLOR_WHITE, s3_act ? COLOR_GREEN : COLOR_BLACK, 1);
 }
 
 // Redraw static screen background and frames
@@ -154,11 +301,11 @@ static void draw_screen_background() {
         tft_fill_rect(4, 140, 312, 96, COLOR_BLACK);
         tft_draw_rect(4, 140, 312, 96, COLOR_YELLOW);
     } else {
-        // Mode 1: Component Tester Console
+        // Mode 1: Graphical Component Tester Console
         tft_print(8, 7, "DSO-TC2 COMPONENT TESTER", COLOR_YELLOW, 0x0010, 1);
         tft_print(232, 7, "[M] CONSOLE", COLOR_CYAN, 0x0010, 1);
 
-        // Card 1: Component Detection Result Window (Y: 28..126)
+        // Card 1: Schematic Graphic Window (Y: 28..126)
         tft_fill_rect(4, 28, 312, 98, COLOR_BLACK);
         tft_draw_rect(4, 28, 312, 98, COLOR_GREEN);
 
@@ -212,22 +359,18 @@ void loop() {
             // ================================================================
             // SCREEN 0: HARDWARE CONSOLE & KEYPAD MATRIX
             // ================================================================
-            // Row 0 (Y = 32)
             draw_btn(12, 32, 92, 28, "POWER", "PB13", b_pwr);
             draw_btn(114, 32, 92, 28, "UP ^", "PC8", b_up);
             draw_btn(216, 32, 92, 28, "MENU", "PB15", b_menu);
 
-            // Row 1 (Y = 68)
             draw_btn(12, 68, 92, 28, "OK / <", "PB14", b_ok);
             draw_btn(114, 68, 92, 28, "RELAY", b_relay ? "ON:PB6" : "OFF:PB6", b_relay);
             draw_btn(216, 68, 92, 28, "TEST / >", "PA8", b_test);
 
-            // Row 2 (Y = 104)
             draw_btn(12, 104, 92, 28, "BUZZER", b_buzz ? "ACTIVE" : "PC6", b_buzz);
             draw_btn(114, 104, 92, 28, "DOWN v", "PC9", b_down);
             draw_btn(216, 104, 92, 28, "IR RX", b_ir ? "SIGNAL!" : "PB9", b_ir);
 
-            // Line 1: Active Event State (Y = 146)
             if (b_pwr) {
                 tft_print(10, 146, ">> POWER: PB13 (Hold 1.5s=Off)  ", COLOR_RED, COLOR_BLACK, 1);
             } else if (b_ir) {
@@ -240,19 +383,14 @@ void loop() {
                 tft_print(10, 146, "STATUS: All 6 Keys & HW Ready   ", COLOR_LIGHTGREY, COLOR_BLACK, 1);
             }
 
-            // Line 2: 1-2-3 ADC Sense Pins (Y = 164)
             tft_print(10, 164, "TESTER SENSE: 1=PA3  2=PA4  3=PA5", COLOR_YELLOW, COLOR_BLACK, 1);
-
-            // Line 3: Probe Resistors (Y = 182)
             tft_print(10, 182, "RL:PA7,PB1,PB10 | RH:PB0,PB2,PB11", COLOR_CYAN, COLOR_BLACK, 1);
 
-            // Line 4: Backlight, Relay & Buzzer (Y = 200)
             uint8_t bl_pct = (uint16_t)l083_data.backlight * 100 / 255;
             snprintf(buf, sizeof(buf), "BL:%2u%% | PWR:PB7 | RLY:%-3s | BUZ:PC6", 
                      bl_pct, b_relay ? "ON" : "OFF");
             tft_print(10, 200, buf, COLOR_WHITE, COLOR_BLACK, 1);
 
-            // Line 5: System Telemetry (Y = 218)
             if (l083_data.connected) {
                 snprintf(buf, sizeof(buf), "VCC:%0.2fV | L083:ONLINE (%2uHz)     ",
                          l083_data.vcc_mv / 1000.0f, 25);
@@ -262,46 +400,52 @@ void loop() {
             }
         } else {
             // ================================================================
-            // SCREEN 1: DEDICATED COMPONENT TESTER CONSOLE
+            // SCREEN 1: DEDICATED GRAPHICAL COMPONENT TESTER
             // ================================================================
-            // Top Card: Component Identification & Measurement (Y: 28..126)
-            tft_print(14, 34, "COMPONENT TEST RESULT:", COLOR_DARKCYAN, COLOR_BLACK, 1);
+            // 1. Draw Visual Schematic Graphic
+            static char prev_type[16] = "";
+            static char prev_pinout[20] = "";
+            if (strcmp(l083_data.comp_type, prev_type) != 0 || 
+                strcmp(l083_data.comp_pinout, prev_pinout) != 0 || 
+                need_full_redraw) {
+                draw_schematic_graphic(l083_data.comp_type, l083_data.comp_pinout);
+                strncpy(prev_type, l083_data.comp_type, sizeof(prev_type) - 1);
+                strncpy(prev_pinout, l083_data.comp_pinout, sizeof(prev_pinout) - 1);
+            }
 
+            // 2. Component Measurement Text (Y: 78..124)
             if (strcmp(l083_data.comp_type, "RESISTOR") == 0) {
-                tft_print(14, 48, ">> RESISTOR <<            ", COLOR_GREEN, COLOR_BLACK, 2);
-                snprintf(buf, sizeof(buf), "VALUE: %-18s ", l083_data.comp_val);
-                tft_print(14, 72, buf, COLOR_YELLOW, COLOR_BLACK, 2);
-                snprintf(buf, sizeof(buf), "TERMINALS: %-18s ", l083_data.comp_pinout);
-                tft_print(14, 98, buf, COLOR_WHITE, COLOR_BLACK, 1);
+                snprintf(buf, sizeof(buf), "R = %-16s", l083_data.comp_val);
+                tft_print(14, 80, buf, COLOR_YELLOW, COLOR_BLACK, 2);
+                snprintf(buf, sizeof(buf), "Terminals: %-18s", l083_data.comp_pinout);
+                tft_print(14, 106, buf, COLOR_WHITE, COLOR_BLACK, 1);
+            } else if (strcmp(l083_data.comp_type, "CAPACITOR") == 0) {
+                snprintf(buf, sizeof(buf), "C = %-16s", l083_data.comp_val);
+                tft_print(14, 80, buf, COLOR_YELLOW, COLOR_BLACK, 2);
+                snprintf(buf, sizeof(buf), "Terminals: %-18s", l083_data.comp_pinout);
+                tft_print(14, 106, buf, COLOR_CYAN, COLOR_BLACK, 1);
             } else if (strcmp(l083_data.comp_type, "DIODE") == 0) {
-                tft_print(14, 48, ">> DIODE / LED <<         ", COLOR_GREEN, COLOR_BLACK, 2);
-                snprintf(buf, sizeof(buf), "%-20s      ", l083_data.comp_val);
-                tft_print(14, 72, buf, COLOR_YELLOW, COLOR_BLACK, 2);
-                snprintf(buf, sizeof(buf), "POLARITY: %-18s  ", l083_data.comp_pinout);
-                tft_print(14, 98, buf, COLOR_CYAN, COLOR_BLACK, 1);
+                snprintf(buf, sizeof(buf), "%-18s", l083_data.comp_val);
+                tft_print(14, 80, buf, COLOR_YELLOW, COLOR_BLACK, 2);
+                snprintf(buf, sizeof(buf), "Diode: %-18s    ", l083_data.comp_pinout);
+                tft_print(14, 106, buf, COLOR_GREEN, COLOR_BLACK, 1);
             } else if (strcmp(l083_data.comp_type, "SHORT") == 0) {
-                tft_print(14, 48, ">> CONTINUITY / SHORT <<  ", COLOR_RED, COLOR_BLACK, 2);
-                snprintf(buf, sizeof(buf), "R = %-18s    ", l083_data.comp_val);
-                tft_print(14, 72, buf, COLOR_YELLOW, COLOR_BLACK, 2);
-                snprintf(buf, sizeof(buf), "TERMINALS: %-18s ", l083_data.comp_pinout);
-                tft_print(14, 98, buf, COLOR_WHITE, COLOR_BLACK, 1);
+                snprintf(buf, sizeof(buf), "R = %-16s", l083_data.comp_val);
+                tft_print(14, 80, buf, COLOR_YELLOW, COLOR_BLACK, 2);
+                snprintf(buf, sizeof(buf), "Continuity: %-16s", l083_data.comp_pinout);
+                tft_print(14, 106, buf, COLOR_RED, COLOR_BLACK, 1);
             } else {
-                tft_print(14, 48, "[ NO COMPONENT DETECTED ] ", COLOR_LIGHTGREY, COLOR_BLACK, 2);
-                tft_print(14, 72, "Insert component into 1-2-3   ", COLOR_YELLOW, COLOR_BLACK, 1);
-                tft_print(14, 88, "and press TEST / > button     ", COLOR_WHITE, COLOR_BLACK, 1);
-                tft_print(14, 106, "Auto-scans: Resistor, Diode, LED", COLOR_CYAN, COLOR_BLACK, 1);
+                tft_print(14, 80, "[ READY FOR TEST ]  ", COLOR_LIGHTGREY, COLOR_BLACK, 2);
+                tft_print(14, 106, "Insert component & press TEST", COLOR_YELLOW, COLOR_BLACK, 1);
             }
 
             // Bottom Card: Socket Terminals & Voltage Readings (Y: 130..236)
-            // Pin 1 Box (X: 12, Y: 136, W: 92, H: 40)
             snprintf(buf, sizeof(buf), "%4u mV", l083_data.s1_mv);
             draw_btn(12, 136, 92, 40, "PIN 1 (PA3)", buf, (l083_data.s1_mv > 100));
 
-            // Pin 2 Box (X: 114, Y: 136, W: 92, H: 40)
             snprintf(buf, sizeof(buf), "%4u mV", l083_data.s2_mv);
             draw_btn(114, 136, 92, 40, "PIN 2 (PA4)", buf, (l083_data.s2_mv > 100));
 
-            // Pin 3 Box (X: 216, Y: 136, W: 92, H: 40)
             snprintf(buf, sizeof(buf), "%4u mV", l083_data.s3_mv);
             draw_btn(216, 136, 92, 40, "PIN 3 (PA5)", buf, (l083_data.s3_mv > 100));
 
@@ -310,7 +454,7 @@ void loop() {
             tft_print(12, 200, "RH (470k): PB0(1)  PB2(2)  PB11(3)", COLOR_CYAN, COLOR_BLACK, 1);
 
             // Help line (Y: 218)
-            tft_print(12, 218, "TEST=Measure | MENU=Hardware Console", 0x07E0, COLOR_BLACK, 1);
+            tft_print(12, 218, "TEST=Measure | MENU=Switch Screen", 0x07E0, COLOR_BLACK, 1);
         }
     }
 }
