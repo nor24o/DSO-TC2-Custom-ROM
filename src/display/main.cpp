@@ -41,7 +41,28 @@ static L083Telemetry l083_data = {
 };
 static char last_raw_pkt[64] = "Waiting for UART...";
 
-// Screen Mode: 0 = Hardware Console, 1 = Graphical Component Tester
+// Decoded Infrared Receiver Telemetry
+struct IrRxTelemetry {
+    char protocol[12];
+    uint16_t address;
+    uint8_t command;
+    uint32_t raw_code;
+    uint32_t repeats;
+    uint32_t last_rx_ms;
+    bool received;
+    // Decoded History
+    uint32_t hist_raw[3];
+    uint16_t hist_addr[3];
+    uint8_t hist_cmd[3];
+    uint8_t hist_cnt;
+};
+
+static IrRxTelemetry ir_rx = {
+    "NONE", 0, 0, 0, 0, 0, false,
+    {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, 0
+};
+
+// Screen Mode: 0 = Hardware Console, 1 = Component Tester, 2 = IR Remote Decoder
 static uint8_t screen_mode = 1;
 static bool need_full_redraw = true;
 
@@ -51,6 +72,39 @@ static uint8_t rx_idx = 0;
 static uint32_t last_rx_time = 0;
 
 static void parse_packet(const char* pkt) {
+    if (strncmp(pkt, "#IR:", 4) == 0) {
+        char proto[12] = "NEC";
+        unsigned int addr = 0, cmd = 0;
+        unsigned long raw = 0, rpt = 0;
+        int n = sscanf(pkt + 4, "%11[^,],%x,%x,%lx,%lu", proto, &addr, &cmd, &raw, &rpt);
+        if (n >= 4) {
+            strncpy(ir_rx.protocol, proto, sizeof(ir_rx.protocol) - 1);
+            ir_rx.address = (uint16_t)addr;
+            ir_rx.command = (uint8_t)cmd;
+            ir_rx.raw_code = (uint32_t)raw;
+            ir_rx.repeats = (uint32_t)rpt;
+            ir_rx.last_rx_ms = millis();
+            ir_rx.received = true;
+
+            // Push to history on new keypress (rpt == 0)
+            if (rpt == 0) {
+                ir_rx.hist_raw[2]  = ir_rx.hist_raw[1];
+                ir_rx.hist_addr[2] = ir_rx.hist_addr[1];
+                ir_rx.hist_cmd[2]  = ir_rx.hist_cmd[1];
+
+                ir_rx.hist_raw[1]  = ir_rx.hist_raw[0];
+                ir_rx.hist_addr[1] = ir_rx.hist_addr[0];
+                ir_rx.hist_cmd[1]  = ir_rx.hist_cmd[0];
+
+                ir_rx.hist_raw[0]  = (uint32_t)raw;
+                ir_rx.hist_addr[0] = (uint16_t)addr;
+                ir_rx.hist_cmd[0]  = (uint8_t)cmd;
+                if (ir_rx.hist_cnt < 3) ir_rx.hist_cnt++;
+            }
+        }
+        return;
+    }
+
     if (strncmp(pkt, "#TC2:", 5) != 0) return;
 
     strncpy(last_raw_pkt, pkt, sizeof(last_raw_pkt) - 1);
@@ -296,7 +350,7 @@ static void draw_screen_background() {
     if (screen_mode == 0) {
         // Mode 0: Hardware Console
         tft_print(8, 7, "DSO-TC2 HARDWARE CONSOLE", COLOR_YELLOW, 0x0010, 1);
-        tft_print(232, 7, "[M] TESTER", COLOR_CYAN, 0x0010, 1);
+        tft_print(232, 7, "[M] TESTER ", COLOR_CYAN, 0x0010, 1);
 
         // Card 1: Keypad Matrix (Y: 26..136)
         tft_fill_rect(4, 26, 312, 110, COLOR_BLACK);
@@ -305,16 +359,30 @@ static void draw_screen_background() {
         // Card 2: Diagnostics (Y: 138..236)
         tft_fill_rect(4, 138, 312, 98, COLOR_BLACK);
         tft_draw_rect(4, 138, 312, 98, COLOR_YELLOW);
-    } else {
+
+    } else if (screen_mode == 1) {
         // Mode 1: Graphical Component Tester Console
         tft_print(8, 7, "DSO-TC2 COMPONENT TESTER", COLOR_YELLOW, 0x0010, 1);
-        tft_print(232, 7, "[M] CONSOLE", COLOR_CYAN, 0x0010, 1);
+        tft_print(232, 7, "[M] IR DEC ", COLOR_CYAN, 0x0010, 1);
 
         // Card 1: Schematic Graphic Window (Y: 26..136)
         tft_fill_rect(4, 26, 312, 110, COLOR_BLACK);
         tft_draw_rect(4, 26, 312, 110, COLOR_GREEN);
 
         // Card 2: Socket Terminal Readings & Telemetry (Y: 138..236)
+        tft_fill_rect(4, 138, 312, 98, COLOR_BLACK);
+        tft_draw_rect(4, 138, 312, 98, COLOR_CYAN);
+
+    } else {
+        // Mode 2: Infrared Remote Decoder Console
+        tft_print(8, 7, "DSO-TC2 IR DECODER (38k)", COLOR_YELLOW, 0x0010, 1);
+        tft_print(232, 7, "[M] CONSOLE", COLOR_CYAN, 0x0010, 1);
+
+        // Card 1: IR Decoder Dashboard (Y: 26..136)
+        tft_fill_rect(4, 26, 312, 110, COLOR_BLACK);
+        tft_draw_rect(4, 26, 312, 110, 0xF81F); // Magenta
+
+        // Card 2: Decoded History Log (Y: 138..236)
         tft_fill_rect(4, 138, 312, 98, COLOR_BLACK);
         tft_draw_rect(4, 138, 312, 98, COLOR_CYAN);
     }
@@ -329,13 +397,13 @@ void setup() {
 void loop() {
     poll_uart();
 
-    // Screen Switching: Press MENU button to toggle screens
+    // Screen Switching: Press MENU button to toggle between 3 screens
     static bool prev_b_menu = false;
     uint8_t m = l083_data.btn_mask;
     bool b_menu = (m & 0x10) != 0;
 
     if (b_menu && !prev_b_menu) {
-        screen_mode = (screen_mode == 0) ? 1 : 0;
+        screen_mode = (screen_mode + 1) % 3;
         need_full_redraw = true;
     }
     prev_b_menu = b_menu;
@@ -406,7 +474,7 @@ void loop() {
 
             tft_print(10, 222, "Press MENU to switch to Tester  ", COLOR_LIGHTGREY, COLOR_BLACK, 1);
 
-        } else {
+        } else if (screen_mode == 1) {
             // ================================================================
             // SCREEN 1: DEDICATED GRAPHICAL COMPONENT TESTER
             // ================================================================
@@ -462,11 +530,89 @@ void loop() {
             // Status lines inside Card 2
             tft_print(12, 184, "RL: 680R (PA7,PB1,PB10) | RH: 470k", COLOR_YELLOW, COLOR_BLACK, 1);
             tft_print(12, 198, "Sense: PA3(1), PA4(2), PA5(3)     ", COLOR_CYAN, COLOR_BLACK, 1);
-            tft_print(12, 212, "TEST=Measure | MENU=Switch Console", 0x07E0, COLOR_BLACK, 1);
+            tft_print(12, 212, "TEST=Measure | MENU=Switch IR Dec ", 0x07E0, COLOR_BLACK, 1);
 
             snprintf(buf, sizeof(buf), "VCC: %0.2fV | L083: ONLINE (25 Hz)   ",
                      l083_data.vcc_mv / 1000.0f);
             tft_print(12, 224, buf, COLOR_WHITE, COLOR_BLACK, 1);
+
+        } else {
+            // ================================================================
+            // SCREEN 2: DEDICATED INFRARED REMOTE DECODER
+            // ================================================================
+            // Clear test log if TEST pressed without holding MENU
+            if (b_test && !b_menu) {
+                ir_rx.received = false;
+                ir_rx.hist_cnt = 0;
+            }
+
+            // Card 1: Decoder Dashboard (Y: 26..136)
+            if (!ir_rx.received) {
+                tft_print(16, 36, "[ WAITING FOR IR REMOTE... ]    ", COLOR_YELLOW, COLOR_BLACK, 1);
+                tft_print(16, 54, "Point remote at front sensor on PB9 ", COLOR_WHITE, COLOR_BLACK, 1);
+                tft_print(16, 72, "Supported: NEC / 38 kHz Remotes     ", COLOR_CYAN, COLOR_BLACK, 1);
+                tft_print(16, 90, "Press any button on remote to test  ", COLOR_LIGHTGREY, COLOR_BLACK, 1);
+                tft_print(16, 110, "Demodulator: Listening on Pin PB9   ", 0x07E0, COLOR_BLACK, 1);
+            } else {
+                bool is_recent = (millis() - ir_rx.last_rx_ms < 500);
+                if (is_recent) {
+                    tft_print(16, 32, ">> IR FRAME DECODED SUCCESSFULLY! <<", COLOR_GREEN, COLOR_BLACK, 1);
+                } else {
+                    tft_print(16, 32, "-- LAST DECODED IR REMOTE SIGNAL -- ", COLOR_LIGHTGREY, COLOR_BLACK, 1);
+                }
+
+                // Big Command & Address
+                snprintf(buf, sizeof(buf), "CMD: 0x%02X", ir_rx.command);
+                tft_print(16, 48, buf, COLOR_YELLOW, COLOR_BLACK, 2);
+
+                snprintf(buf, sizeof(buf), "ADDR:0x%04X", ir_rx.address);
+                tft_print(168, 48, buf, COLOR_CYAN, COLOR_BLACK, 2);
+
+                // Protocol & Repeats
+                snprintf(buf, sizeof(buf), "Proto: %-4s | Repeats: %-3lu (Held) ", 
+                         ir_rx.protocol, ir_rx.repeats);
+                tft_print(16, 74, buf, COLOR_WHITE, COLOR_BLACK, 1);
+
+                // Raw 32-bit hex
+                snprintf(buf, sizeof(buf), "Raw 32-bit: 0x%08lX             ", ir_rx.raw_code);
+                tft_print(16, 90, buf, COLOR_YELLOW, COLOR_BLACK, 1);
+
+                // 32-Bit Visual Pulse Bar
+                tft_print(16, 106, "Bit Stream:", COLOR_LIGHTGREY, COLOR_BLACK, 1);
+                for (int b = 0; b < 32; b++) {
+                    bool bit_val = (ir_rx.raw_code & (1UL << b)) != 0;
+                    uint16_t b_col = bit_val ? COLOR_GREEN : 0x001F;
+                    tft_fill_rect(106 + b * 6, 107, 5, 8, b_col);
+                }
+
+                uint32_t ago = (millis() - ir_rx.last_rx_ms) / 1000;
+                snprintf(buf, sizeof(buf), "Elapsed: %lu sec ago (%s)        ", 
+                         ago, (ago < 1) ? "ACTIVE" : "IDLE");
+                tft_print(16, 120, buf, (ago < 1) ? COLOR_GREEN : COLOR_LIGHTGREY, COLOR_BLACK, 1);
+            }
+
+            // Card 2: History Log (Y: 138..236)
+            tft_print(12, 144, "DECODED IR HISTORY (Recent Keys):", COLOR_CYAN, COLOR_BLACK, 1);
+
+            if (ir_rx.hist_cnt == 0) {
+                tft_print(12, 162, "No recent codes in buffer.        ", COLOR_DARKGREY, COLOR_BLACK, 1);
+                tft_print(12, 178, "Codes appear here as remote sends.", COLOR_DARKGREY, COLOR_BLACK, 1);
+                tft_print(12, 194, "Press TEST to clear history buffer", COLOR_DARKGREY, COLOR_BLACK, 1);
+            } else {
+                for (int h = 0; h < 3; h++) {
+                    int16_t hy = 162 + (h * 16);
+                    if (h < ir_rx.hist_cnt) {
+                        snprintf(buf, sizeof(buf), "#%d: Addr:0x%04X Cmd:0x%02X Raw:%08lX", 
+                                 h + 1, ir_rx.hist_addr[h], ir_rx.hist_cmd[h], ir_rx.hist_raw[h]);
+                        tft_print(12, hy, buf, (h == 0) ? COLOR_YELLOW : COLOR_WHITE, COLOR_BLACK, 1);
+                    } else {
+                        tft_print(12, hy, "                                  ", COLOR_BLACK, COLOR_BLACK, 1);
+                    }
+                }
+            }
+
+            tft_print(12, 212, "Sensor: PB9 Demodulator (Active-L)", COLOR_LIGHTGREY, COLOR_BLACK, 1);
+            tft_print(12, 224, "MENU=Next Screen | TEST=Clear Log ", 0x07E0, COLOR_BLACK, 1);
         }
     }
 }

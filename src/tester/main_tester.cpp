@@ -103,6 +103,87 @@ static uint32_t read_vcc_mv() {
     return (VREFINT_CAL_VREF * cal) / raw_vref;
 }
 
+// ============================================================================
+// INFRARED REMOTE DECODER ENGINE (NEC / 38 kHz)
+// ============================================================================
+struct IrDecodedData {
+    char protocol[12];
+    uint16_t address;
+    uint8_t command;
+    uint32_t raw_code;
+    uint32_t repeat_count;
+    uint32_t last_rx_ms;
+    bool has_new;
+};
+
+static volatile IrDecodedData ir_data = {"NONE", 0, 0, 0, 0, 0, false};
+
+static void ir_exti_isr() {
+    uint32_t now = micros();
+    static uint32_t last_edge = 0;
+    uint32_t dt = now - last_edge;
+    last_edge = now;
+
+    static uint32_t raw_shift = 0;
+    static uint8_t bit_count = 0;
+    static bool in_frame = false;
+
+    // NEC Leader Pulse: 9ms LOW + 4.5ms HIGH = 13.5ms between falling edges
+    if (dt >= 12000 && dt <= 15500) {
+        raw_shift = 0;
+        bit_count = 0;
+        in_frame = true;
+        return;
+    } else if (dt >= 10000 && dt < 12000) {
+        // NEC Repeat Code: 9ms LOW + 2.25ms HIGH = 11.25ms
+        if (ir_data.raw_code != 0) {
+            ir_data.repeat_count++;
+            ir_data.last_rx_ms = millis();
+            ir_data.has_new = true;
+        }
+        in_frame = false;
+        return;
+    }
+
+    if (in_frame) {
+        if (dt >= 750 && dt <= 1500) {
+            // Bit 0 (~1.125 ms)
+            raw_shift = (raw_shift >> 1); // LSB first
+            bit_count++;
+        } else if (dt >= 1700 && dt <= 2850) {
+            // Bit 1 (~2.25 ms)
+            raw_shift = (raw_shift >> 1) | 0x80000000UL; // LSB first
+            bit_count++;
+        } else {
+            // Timing violation / noise glitch
+            in_frame = false;
+            return;
+        }
+
+        if (bit_count == 32) {
+            in_frame = false;
+            ir_data.raw_code = raw_shift;
+            uint8_t a0 = raw_shift & 0xFF;
+            uint8_t a1 = (raw_shift >> 8) & 0xFF;
+            uint8_t c0 = (raw_shift >> 16) & 0xFF;
+            uint8_t c1 = (raw_shift >> 24) & 0xFF;
+
+            if ((c0 ^ c1) == 0xFF) {
+                strcpy((char*)ir_data.protocol, "NEC");
+                ir_data.address = (a0 == (uint8_t)~a1) ? a0 : (a0 | ((uint16_t)a1 << 8));
+                ir_data.command = c0;
+            } else {
+                strcpy((char*)ir_data.protocol, "RAW");
+                ir_data.address = a0 | ((uint16_t)a1 << 8);
+                ir_data.command = c0;
+            }
+            ir_data.repeat_count = 0;
+            ir_data.last_rx_ms = millis();
+            ir_data.has_new = true;
+        }
+    }
+}
+
 static void release_probes() {
     pinMode(PIN_SOCK_1, INPUT);
     pinMode(PIN_SOCK_2, INPUT);
@@ -344,34 +425,43 @@ static void test_pair(uint32_t pin_rl_a, uint32_t pin_rh_a, PinName sock_a, uint
     }
 
     // ------------------------------------------------------------------------
-    // CASE D: HIGH-RANGE RESISTOR (20 kOhm .. 20 MOhm via 470k)
+    // CASE D: HIGH-RANGE RESISTOR (30 kOhm .. 20 MOhm via dual RH 470k)
     // ------------------------------------------------------------------------
+    // Forward: Drive A via RH HIGH (470k to 3.3V), Drive B via RH LOW (470k to GND)
     pinMode(pin_rh_a, OUTPUT);
     digitalWrite(pin_rh_a, HIGH);
-    pinMode(pin_rl_b, OUTPUT);
-    digitalWrite(pin_rl_b, LOW);
-    delayMicroseconds(800);
+    pinMode(pin_rh_b, OUTPUT);
+    digitalWrite(pin_rh_b, LOW);
+    delayMicroseconds(1000);
+
     uint32_t va_rh = (adc_read_value(sock_a, 12) * vcc_mv) / 4095;
+    uint32_t vb_rh = (adc_read_value(sock_b, 12) * vcc_mv) / 4095;
     release_probes();
     delayMicroseconds(200);
 
+    // Reverse: Drive B via RH HIGH (470k to 3.3V), Drive A via RH LOW (470k to GND)
     pinMode(pin_rh_b, OUTPUT);
     digitalWrite(pin_rh_b, HIGH);
-    pinMode(pin_rl_a, OUTPUT);
-    digitalWrite(pin_rl_a, LOW);
-    delayMicroseconds(800);
-    uint32_t vb_rh = (adc_read_value(sock_b, 12) * vcc_mv) / 4095;
+    pinMode(pin_rh_a, OUTPUT);
+    digitalWrite(pin_rh_a, LOW);
+    delayMicroseconds(1000);
+
+    uint32_t vb_rh_rev = (adc_read_value(sock_b, 12) * vcc_mv) / 4095;
+    uint32_t va_rh_rev = (adc_read_value(sock_a, 12) * vcc_mv) / 4095;
     release_probes();
 
-    // Symmetrical resistive voltage divider: Va = Vcc * Rx / (470k + Rx)
-    if (va_rh > 60 && va_rh < (vcc_mv - 60) &&
-        vb_rh > 60 && vb_rh < (vcc_mv - 60) &&
-        abs((int32_t)va_rh - (int32_t)vb_rh) < 500) {
+    // Symmetrical conduction with measurable current flowing through bottom 470k resistor:
+    // When open: Vb_rh == 0 mV and Va_rh_rev == 0 mV
+    if (vb_rh > 50 && va_rh > vb_rh && 
+        va_rh_rev > 50 && vb_rh_rev > va_rh_rev) {
 
         found = true;
         strcpy(comp_res.type, "RESISTOR");
-        uint32_t v_avg = (va_rh + vb_rh) / 2;
-        uint32_t r_ohm = (470000UL * v_avg) / (vcc_mv > v_avg ? (vcc_mv - v_avg) : 1);
+        uint32_t delta_v_fwd = va_rh - vb_rh;
+        uint32_t delta_v_rev = vb_rh_rev - va_rh_rev;
+        uint32_t r_fwd = (470000UL * delta_v_fwd) / (vb_rh > 0 ? vb_rh : 1);
+        uint32_t r_rev = (470000UL * delta_v_rev) / (va_rh_rev > 0 ? va_rh_rev : 1);
+        uint32_t r_ohm = (r_fwd + r_rev) / 2;
 
         if (r_ohm < 1000000) {
             snprintf(comp_res.value, sizeof(comp_res.value), "%lu.%01lu kOhm", r_ohm / 1000, (r_ohm % 1000) / 100);
@@ -454,8 +544,9 @@ void setup() {
     pinMode(PIN_RELAY, OUTPUT);
     digitalWrite(PIN_RELAY, LOW);
 
-    // 5. Infrared Receiver
+    // 5. Infrared Receiver (Demodulated active LOW on PB9)
     pinMode(PIN_IR_RX, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(PIN_IR_RX), ir_exti_isr, FALLING);
 
     // 6. Buttons
     pinMode(PIN_BTN_PWR,  INPUT_PULLUP);
@@ -501,19 +592,21 @@ void loop() {
     bool b_menu  = !(rb & (1U << 15));  // PB15: MENU / AUTO
     bool b_pwr   = !(rb & (1U << 13));  // PB13: POWER
 
-    // IR Receiver on PB9
-    bool ir_pulse = !(rb & (1U << 9));
-    static uint32_t last_ir_time = 0;
-    static uint32_t ir_pulse_count = 0;
-    static bool prev_ir_pulse = false;
-    if (ir_pulse && !prev_ir_pulse) {
-        ir_pulse_count++;
-        last_ir_time = millis();
-        beep_square(3200, 10);
-        rtt.printf(">> [IR EVENT] Pulse on PB9! Count: %lu\n", ir_pulse_count);
+    // IR Receiver on PB9 & Decoded Command Handler
+    if (ir_data.has_new) {
+        ir_data.has_new = false;
+        beep_square(4200, 20); // crisp high confirmation chime
+        rtt.printf(">> [IR DECODE] Proto: %s | Addr: 0x%04X | Cmd: 0x%02X | Raw: 0x%08lX | Rpt: %lu\n",
+                   ir_data.protocol, ir_data.address, ir_data.command, ir_data.raw_code, ir_data.repeat_count);
+
+        char ir_pkt[96];
+        snprintf(ir_pkt, sizeof(ir_pkt), "#IR:%s,%04X,%02X,%08lX,%lu*\n",
+                 ir_data.protocol, ir_data.address, ir_data.command, ir_data.raw_code, ir_data.repeat_count);
+#if defined(USART1)
+        SerialUART1.print(ir_pkt);
+#endif
     }
-    prev_ir_pulse = ir_pulse;
-    bool ir_active = (millis() - last_ir_time < 300);
+    bool ir_active = (millis() - ir_data.last_rx_ms < 300);
 
     // Relay Toggle: Hold MENU and press TEST (PA8)
     static uint32_t last_relay_toggle = 0;
