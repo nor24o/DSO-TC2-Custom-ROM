@@ -61,33 +61,14 @@ static L083Telemetry l083_data = {
 };
 static char last_raw_pkt[64] = "Waiting for UART...";
 
-// Li-Po Battery Monitor (Direct bare-metal ADC1 register sampling on PA2, zero HAL overhead)
+// Li-Po Battery Monitor (Telemetry-driven from Tester MCU PA2 2:1 resistive divider)
 static uint16_t batt_mv = 3800;
 static uint8_t  batt_pct = 75;
 static uint8_t  prev_batt_pct = 0xFF;
 static uint16_t prev_batt_mv = 0;
 
-static uint16_t adc_read_pa2_baremetal() {
-    RCC->APB2ENR |= RCC_APB2ENR_ADC1EN | RCC_APB2ENR_IOPAEN;
-    GPIOA->CRL &= ~(0xFU << 8); // PA2 analog mode (CNF=00, MODE=00)
-    ADC1->CR2 |= ADC_CR2_ADON;
-    ADC1->SQR3 = 2; // Channel 2 (PA2)
-    ADC1->CR2 |= ADC_CR2_ADON; // Start single conversion
-    uint32_t timeout = 2000;
-    while (!(ADC1->SR & ADC_SR_EOC) && --timeout);
-    return (uint16_t)ADC1->DR;
-}
-
-static void sample_battery_direct() {
-    static uint32_t last_batt_sample = 0;
-    if (millis() - last_batt_sample < 250) return;
-    last_batt_sample = millis();
-
-    uint32_t raw = adc_read_pa2_baremetal();
-    // PA2 is connected to the Li-Po battery via a 2:1 resistive divider
-    // Vbatt = Vadc * 2 = (raw * 3300 * 2) / 4095 = (raw * 6600) / 4095
-    uint32_t mv = (raw * 6600UL) / 4095UL;
-    if (mv >= 2500 && mv <= 4500) {
+static void update_battery_from_telemetry(uint32_t mv) {
+    if (mv >= 2500 && mv <= 5000) {
         batt_mv = (uint16_t)mv;
         if (batt_mv <= 3300) batt_pct = 0;
         else if (batt_mv >= 4180) batt_pct = 100;
@@ -244,12 +225,7 @@ static void parse_packet(const char* pkt) {
                 screen_mode = (uint8_t)sc_mode;
                 need_full_redraw = true;
             }
-            if (batt_v >= 2500 && batt_v <= 5000) {
-                batt_mv = (uint16_t)batt_v;
-                if (batt_mv <= 3300) batt_pct = 0;
-                else if (batt_mv >= 4180) batt_pct = 100;
-                else batt_pct = (uint8_t)(((uint32_t)(batt_mv - 3300) * 100UL) / (4180UL - 3300UL));
-            }
+            update_battery_from_telemetry(batt_v);
         }
     }
 }
@@ -1095,7 +1071,6 @@ static void render_screen_siggen(bool full_redraw) {
 static uint8_t active_rendered_screen = 0xFF;
 
 void setup() {
-    sample_battery_direct();
     tft_init();
     Serial1.setRx(PA10);
     Serial1.setTx(PA9);
@@ -1105,7 +1080,6 @@ void setup() {
 
 void loop() {
     poll_uart();
-    sample_battery_direct();
 
     // Infallible screen mode transition detection
     if (screen_mode != active_rendered_screen) {

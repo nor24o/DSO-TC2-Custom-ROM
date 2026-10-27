@@ -781,69 +781,84 @@ static bool test_capacitance(uint8_t a_idx, uint8_t b_idx, uint32_t vcc_mv) {
 }
 
 // ============================================================================
-// 1-WIRE DIGITAL TEMPERATURE SENSOR ENGINE (DS18B20 / DS18S20 / DS1822)
+// BARE-METAL HIGH-SPEED 1-WIRE ENGINE (DS18B20 / DS18S20 / DS1822)
+// Direct IOPORT GPIOA register manipulation, zero HAL overhead, exact 1-Wire timing
 // ============================================================================
-static void onewire_set_low(uint32_t dq_pin) {
-    pinMode(dq_pin, OUTPUT);
-    digitalWrite(dq_pin, LOW);
+static inline void ow_pin_low(uint8_t pin) {
+    GPIOA->BSRR = (1U << (pin + 16)); // Pull pin LOW
+    GPIOA->MODER = (GPIOA->MODER & ~(3U << (pin * 2))) | (1U << (pin * 2)); // Output mode (01)
 }
 
-static void onewire_release(uint32_t dq_pin) {
-    pinMode(dq_pin, INPUT_PULLUP);
+static inline void ow_pin_release(uint8_t pin) {
+    GPIOA->MODER &= ~(3U << (pin * 2)); // Input mode (00)
+    GPIOA->PUPDR = (GPIOA->PUPDR & ~(3U << (pin * 2))) | (1U << (pin * 2)); // Internal Pull-up (01)
 }
 
-static bool onewire_reset_pulse(uint32_t dq_pin) {
-    onewire_release(dq_pin);
-    delayMicroseconds(20);
-    if (digitalRead(dq_pin) == LOW) return false;
-
-    onewire_set_low(dq_pin);
-    delayMicroseconds(480);
-    onewire_release(dq_pin);
-    delayMicroseconds(70);
-
-    uint8_t presence = digitalRead(dq_pin);
-    delayMicroseconds(410);
-
-    if (digitalRead(dq_pin) == LOW) return false;
-    return (presence == LOW);
+static inline uint8_t ow_pin_read(uint8_t pin) {
+    return (uint8_t)((GPIOA->IDR >> pin) & 1U);
 }
 
-static void onewire_write_bit(uint32_t dq_pin, uint8_t b) {
+static bool onewire_reset_pulse(uint8_t pin) {
+    ow_pin_release(pin);
+    delayMicroseconds(40);
+    if (ow_pin_read(pin) == 0) return false; // Bus shorted to ground
+
+    ow_pin_low(pin);
+    delayMicroseconds(480); // Reset pulse (480us)
+
+    __disable_irq();
+    ow_pin_release(pin);
+    delayMicroseconds(65);  // Wait for DS18B20 presence response
+    uint8_t presence = (ow_pin_read(pin) == 0); // Slave pulls LOW
+    __enable_irq();
+
+    delayMicroseconds(420); // Complete reset sequence
+    if (ow_pin_read(pin) == 0) return false; // Bus stuck LOW
+
+    return presence;
+}
+
+static void onewire_write_bit(uint8_t pin, uint8_t b) {
     if (b) {
-        onewire_set_low(dq_pin);
-        delayMicroseconds(6);
-        onewire_release(dq_pin);
-        delayMicroseconds(64);
+        __disable_irq();
+        ow_pin_low(pin);
+        delayMicroseconds(2);
+        ow_pin_release(pin);
+        __enable_irq();
+        delayMicroseconds(58);
     } else {
-        onewire_set_low(dq_pin);
+        __disable_irq();
+        ow_pin_low(pin);
         delayMicroseconds(60);
-        onewire_release(dq_pin);
+        ow_pin_release(pin);
+        __enable_irq();
         delayMicroseconds(10);
     }
 }
 
-static uint8_t onewire_read_bit(uint32_t dq_pin) {
-    onewire_set_low(dq_pin);
-    delayMicroseconds(5);
-    onewire_release(dq_pin);
-    delayMicroseconds(10);
-    uint8_t b = digitalRead(dq_pin);
-    delayMicroseconds(55);
+static uint8_t onewire_read_bit(uint8_t pin) {
+    __disable_irq();
+    ow_pin_low(pin);
+    delayMicroseconds(2);
+    ow_pin_release(pin);
+    delayMicroseconds(8); // Total 10us from falling edge (exact center of 15us window)
+    uint8_t b = ow_pin_read(pin);
+    __enable_irq();
+    delayMicroseconds(50); // Finish 60us timeslot
     return b;
 }
 
-static void onewire_write_byte(uint32_t dq_pin, uint8_t byte) {
+static void onewire_write_byte(uint8_t pin, uint8_t byte) {
     for (uint8_t i = 0; i < 8; i++) {
-        onewire_write_bit(dq_pin, (byte >> i) & 1);
+        onewire_write_bit(pin, (byte >> i) & 1);
     }
 }
 
-static uint8_t onewire_read_byte(uint32_t dq_pin) {
+static uint8_t onewire_read_byte(uint8_t pin) {
     uint8_t byte = 0;
     for (uint8_t i = 0; i < 8; i++) {
-        if (onewire_read_bit(dq_pin)) {
-            byte |= (1 << i);
+        if (onewire_read_bit(pin)) {
+            byte |= (1U << i);
         }
     }
     return byte;
@@ -875,12 +890,12 @@ static bool probe_1wire_device(uint8_t gnd_idx, uint8_t dq_idx, uint8_t vdd_idx)
     pinMode(PROBES[vdd_idx].pin_direct, OUTPUT);
     digitalWrite(PROBES[vdd_idx].pin_direct, HIGH);
 
-    uint32_t dq_pin = PROBES[dq_idx].pin_direct;
+    uint8_t dq_pin = 3 + dq_idx; // PA3 (3), PA4 (4), PA5 (5)
     pinMode(PROBES[dq_idx].pin_rl, INPUT_PULLUP);
     pinMode(PROBES[dq_idx].pin_rh, INPUT_PULLUP);
-    onewire_release(dq_pin);
+    ow_pin_release(dq_pin);
 
-    delay(30); // Power-on settle for DS18B20 internal logic (25-30ms required)
+    delay(40); // Power-on settle for DS18B20 internal logic (25-30ms required)
 
     if (!onewire_reset_pulse(dq_pin)) {
         release_probes();
@@ -900,18 +915,22 @@ static bool probe_1wire_device(uint8_t gnd_idx, uint8_t dq_idx, uint8_t vdd_idx)
     }
 
     if (rom[0] == 0x28 || rom[0] == 0x10 || rom[0] == 0x22) {
+        // Issue Convert T command (0x44)
         if (!onewire_reset_pulse(dq_pin)) { release_probes(); return false; }
-        onewire_write_byte(dq_pin, 0xCC);
-        onewire_write_byte(dq_pin, 0x44);
+        onewire_write_byte(dq_pin, 0xCC); // Skip ROM
+        onewire_write_byte(dq_pin, 0x44); // Convert T
 
+        // Wait for temperature conversion (up to 750ms for 12-bit DS18B20)
         uint32_t t_start = millis();
         while (onewire_read_bit(dq_pin) == 0) {
-            if (millis() - t_start > 150) break;
+            if (millis() - t_start > 800) break;
+            delay(5);
         }
 
+        // Read Scratchpad (0xBE)
         if (!onewire_reset_pulse(dq_pin)) { release_probes(); return false; }
-        onewire_write_byte(dq_pin, 0xCC);
-        onewire_write_byte(dq_pin, 0xBE);
+        onewire_write_byte(dq_pin, 0xCC); // Skip ROM
+        onewire_write_byte(dq_pin, 0xBE); // Read Scratchpad
 
         uint8_t sp[9];
         for (int i = 0; i < 9; i++) {
@@ -964,50 +983,50 @@ static bool probe_dht_sensor(uint8_t vdd_idx, uint8_t dat_idx, uint8_t gnd_idx) 
     pinMode(PROBES[gnd_idx].pin_rl, OUTPUT); digitalWrite(PROBES[gnd_idx].pin_rl, LOW);
     pinMode(PROBES[gnd_idx].pin_direct, OUTPUT); digitalWrite(PROBES[gnd_idx].pin_direct, LOW);
 
-    uint32_t dat_pin = PROBES[dat_idx].pin_direct;
+    uint8_t dat_pin = 3 + dat_idx; // PA3 (3), PA4 (4), PA5 (5)
     pinMode(PROBES[dat_idx].pin_rl, INPUT);
     pinMode(PROBES[dat_idx].pin_rh, INPUT);
-    pinMode(dat_pin, INPUT_PULLUP);
+    ow_pin_release(dat_pin);
     delay(20);
 
-    if (digitalRead(dat_pin) == LOW) {
+    if (ow_pin_read(dat_pin) == 0) {
         release_probes();
         return false;
     }
 
-    pinMode(dat_pin, OUTPUT);
-    digitalWrite(dat_pin, LOW);
+    // Host Start: LOW for 20ms
+    ow_pin_low(dat_pin);
     delay(20);
-    pinMode(dat_pin, INPUT_PULLUP);
+    ow_pin_release(dat_pin);
     delayMicroseconds(35);
 
-    if (digitalRead(dat_pin) != LOW) {
+    if (ow_pin_read(dat_pin) != 0) {
         release_probes();
         return false;
     }
 
     uint32_t to = micros();
-    while (digitalRead(dat_pin) == LOW) {
+    while (ow_pin_read(dat_pin) == 0) {
         if (micros() - to > 120) { release_probes(); return false; }
     }
     to = micros();
-    while (digitalRead(dat_pin) == HIGH) {
+    while (ow_pin_read(dat_pin) == 1) {
         if (micros() - to > 120) { release_probes(); return false; }
     }
 
     uint8_t data[5] = {0};
     for (int i = 0; i < 40; i++) {
         to = micros();
-        while (digitalRead(dat_pin) == LOW) {
+        while (ow_pin_read(dat_pin) == 0) {
             if (micros() - to > 80) { release_probes(); return false; }
         }
         uint32_t t_start = micros();
         to = micros();
-        while (digitalRead(dat_pin) == HIGH) {
+        while (ow_pin_read(dat_pin) == 1) {
             if (micros() - to > 100) { release_probes(); return false; }
         }
         uint32_t pulse_len = micros() - t_start;
-        if (pulse_len > 45) {
+        if (pulse_len > 40) {
             data[i / 8] |= (1 << (7 - (i % 8)));
         }
     }
@@ -1125,7 +1144,7 @@ static void run_component_test() {
         strcpy(comp_res.type, "DIODE");
         snprintf(comp_res.pinout, sizeof(comp_res.pinout), "%d->%d & %d->%d",
                  found_diodes[0].a, found_diodes[0].k, found_diodes[1].a, found_diodes[1].k);
-        snprintf(comp_res.value, sizeof(comp_res.value), "Vf=%u,%umV", found_diodes[0].vf_mv, found_diodes[1].vf_mv);
+        snprintf(comp_res.value, sizeof(comp_res.value), "Vf=%u/%umV", found_diodes[0].vf_mv, found_diodes[1].vf_mv);
         rtt.printf(">> [COMPONENT DETECTED] DUAL DIODE: %s (%s)\n", comp_res.value, comp_res.pinout);
         test_success_chime();
         release_probes();
