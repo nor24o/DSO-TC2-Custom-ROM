@@ -315,7 +315,7 @@ static void discharge_socket(uint16_t ms = 30) {
 struct ComponentResult {
     char type[16];     // "NONE", "RESISTOR", "DIODE", "CAPACITOR", "NPN", "PNP", "N-MOS", "P-MOS", "SHORT"
     char value[24];    // "1.00 kOhm", "100.0 nF", "Vf=0.68V"
-    char pinout[20];   // "Pins 1 - 2", "1(A) -> 2(K)", "B:1 C:2 E:3", "G:1 D:2 S:3"
+    char pinout[28];   // "Pins 1 - 2", "1(A) -> 2(K)", "B:1 C:2 E:3", "G:1 D:2 S:3"
     uint16_t s1_mv;
     uint16_t s2_mv;
     uint16_t s3_mv;
@@ -327,12 +327,13 @@ struct SocketDef {
     uint32_t pin_rl;
     uint32_t pin_rh;
     PinName adc_pin;
+    uint32_t pin_direct;
     uint8_t idx;
 };
 static const SocketDef PROBES[3] = {
-    {PIN_RL1, PIN_RH1, PA_3, 1},
-    {PIN_RL2, PIN_RH2, PA_4, 2},
-    {PIN_RL3, PIN_RH3, PA_5, 3}
+    {PIN_RL1, PIN_RH1, PA_3, PIN_SOCK_1, 1},
+    {PIN_RL2, PIN_RH2, PA_4, PIN_SOCK_2, 2},
+    {PIN_RL3, PIN_RH3, PA_5, PIN_SOCK_3, 3}
 };
 
 struct DiodeDetection {
@@ -340,6 +341,12 @@ struct DiodeDetection {
     uint8_t k;     // Cathode index (1..3)
     uint16_t vf_mv;
 };
+
+static void test_success_chime() {
+    beep_square(2400, 20);
+    delay(15);
+    beep_square(3400, 30);
+}
 
 // Returns diode forward voltage in mV if conducting from a_idx -> b_idx, or 0 if non-conducting
 static uint16_t probe_diode_direction(uint8_t a_idx, uint8_t b_idx, uint32_t vcc_mv) {
@@ -405,21 +412,22 @@ static bool test_resistor(uint8_t a_idx, uint8_t b_idx, uint32_t vcc_mv) {
     uint32_t va_rev = (adc_read_value(probe_a.adc_pin, 12) * vcc_mv) / 4095;
     release_probes();
 
-    // Check Short (< 15 Ohm)
+    // Check Short / Continuity (< 15 Ohm)
     if (vb_fwd > 1200 && va_rev > 1200) {
         int32_t diff_fwd = abs((int32_t)va_fwd - (int32_t)vb_fwd);
         int32_t diff_rev = abs((int32_t)vb_rev - (int32_t)va_rev);
         if (diff_fwd < 140 && diff_rev < 140) {
-            strcpy(comp_res.type, "SHORT");
+            strcpy(comp_res.type, "CONTINUITY");
             uint32_t avg_diff = (diff_fwd + diff_rev) / 2;
             uint32_t r_ohm = (680UL * avg_diff) / (vb_fwd > 0 ? vb_fwd : 1);
             if (r_ohm < 2) {
-                snprintf(comp_res.value, sizeof(comp_res.value), "< 1.0 Ohm");
+                snprintf(comp_res.value, sizeof(comp_res.value), "< 1.0 Ohm BEEP");
             } else {
-                snprintf(comp_res.value, sizeof(comp_res.value), "%lu.%lu Ohm", r_ohm, (avg_diff * 6800UL / vb_fwd) % 10);
+                snprintf(comp_res.value, sizeof(comp_res.value), "%lu.%lu Ohm BEEP", r_ohm, (avg_diff * 6800UL / vb_fwd) % 10);
             }
             snprintf(comp_res.pinout, sizeof(comp_res.pinout), "Pins %d - %d", probe_a.idx, probe_b.idx);
-            rtt.printf(">> [COMPONENT DETECTED] SHORT: %s (%s)\n", comp_res.value, comp_res.pinout);
+            rtt.printf(">> [CONTINUITY BEEP] SHORT: %s (%s)\n", comp_res.value, comp_res.pinout);
+            beep_square(3200, 70);
             return true;
         }
     }
@@ -438,6 +446,7 @@ static bool test_resistor(uint8_t a_idx, uint8_t b_idx, uint32_t vcc_mv) {
         }
         snprintf(comp_res.pinout, sizeof(comp_res.pinout), "Pins %d - %d", probe_a.idx, probe_b.idx);
         rtt.printf(">> [COMPONENT DETECTED] RESISTOR (RL): %s (%s)\n", comp_res.value, comp_res.pinout);
+        test_success_chime();
         return true;
     }
 
@@ -464,7 +473,6 @@ static bool test_resistor(uint8_t a_idx, uint8_t b_idx, uint32_t vcc_mv) {
     digitalWrite(probe_a.pin_rh, LOW);
     delayMicroseconds(1000);
 
-    uint32_t vb_rh_rev_1 = (adc_read_value(probe_b.adc_pin, 12) * vcc_mv) / 4095;
     uint32_t va_rh_rev_1 = (adc_read_value(probe_a.adc_pin, 12) * vcc_mv) / 4095;
     delay(5);
     uint32_t va_rh_rev_2 = (adc_read_value(probe_a.adc_pin, 12) * vcc_mv) / 4095;
@@ -487,6 +495,7 @@ static bool test_resistor(uint8_t a_idx, uint8_t b_idx, uint32_t vcc_mv) {
             }
             snprintf(comp_res.pinout, sizeof(comp_res.pinout), "Pins %d - %d", probe_a.idx, probe_b.idx);
             rtt.printf(">> [COMPONENT DETECTED] RESISTOR (RH): %s (%s)\n", comp_res.value, comp_res.pinout);
+            test_success_chime();
             return true;
         }
     }
@@ -558,6 +567,7 @@ static bool test_capacitance(uint8_t a_idx, uint8_t b_idx, uint32_t vcc_mv) {
             }
             snprintf(comp_res.pinout, sizeof(comp_res.pinout), "Pins %d - %d", probe_a.idx, probe_b.idx);
             rtt.printf(">> [COMPONENT DETECTED] CAPACITOR: %s (%s)\n", comp_res.value, comp_res.pinout);
+            test_success_chime();
             discharge_socket(30);
             return true;
         }
@@ -594,6 +604,7 @@ static bool test_capacitance(uint8_t a_idx, uint8_t b_idx, uint32_t vcc_mv) {
             }
             snprintf(comp_res.pinout, sizeof(comp_res.pinout), "Pins %d - %d", probe_a.idx, probe_b.idx);
             rtt.printf(">> [COMPONENT DETECTED] CAPACITOR: %s (%s)\n", comp_res.value, comp_res.pinout);
+            test_success_chime();
             discharge_socket(60);
             return true;
         }
@@ -603,8 +614,257 @@ static bool test_capacitance(uint8_t a_idx, uint8_t b_idx, uint32_t vcc_mv) {
     return false;
 }
 
+// ============================================================================
+// 1-WIRE DIGITAL TEMPERATURE SENSOR ENGINE (DS18B20 / DS18S20 / DS1822)
+// ============================================================================
+static void onewire_set_low(uint32_t dq_pin) {
+    pinMode(dq_pin, OUTPUT);
+    digitalWrite(dq_pin, LOW);
+}
+
+static void onewire_release(uint32_t dq_pin) {
+    pinMode(dq_pin, INPUT_PULLUP);
+}
+
+static bool onewire_reset_pulse(uint32_t dq_pin) {
+    onewire_release(dq_pin);
+    delayMicroseconds(20);
+    if (digitalRead(dq_pin) == LOW) return false;
+
+    onewire_set_low(dq_pin);
+    delayMicroseconds(480);
+    onewire_release(dq_pin);
+    delayMicroseconds(70);
+
+    uint8_t presence = digitalRead(dq_pin);
+    delayMicroseconds(410);
+
+    if (digitalRead(dq_pin) == LOW) return false;
+    return (presence == LOW);
+}
+
+static void onewire_write_bit(uint32_t dq_pin, uint8_t b) {
+    if (b) {
+        onewire_set_low(dq_pin);
+        delayMicroseconds(6);
+        onewire_release(dq_pin);
+        delayMicroseconds(64);
+    } else {
+        onewire_set_low(dq_pin);
+        delayMicroseconds(60);
+        onewire_release(dq_pin);
+        delayMicroseconds(10);
+    }
+}
+
+static uint8_t onewire_read_bit(uint32_t dq_pin) {
+    onewire_set_low(dq_pin);
+    delayMicroseconds(5);
+    onewire_release(dq_pin);
+    delayMicroseconds(10);
+    uint8_t b = digitalRead(dq_pin);
+    delayMicroseconds(55);
+    return b;
+}
+
+static void onewire_write_byte(uint32_t dq_pin, uint8_t byte) {
+    for (uint8_t i = 0; i < 8; i++) {
+        onewire_write_bit(dq_pin, (byte >> i) & 1);
+    }
+}
+
+static uint8_t onewire_read_byte(uint32_t dq_pin) {
+    uint8_t byte = 0;
+    for (uint8_t i = 0; i < 8; i++) {
+        if (onewire_read_bit(dq_pin)) {
+            byte |= (1 << i);
+        }
+    }
+    return byte;
+}
+
+static uint8_t onewire_crc8(const uint8_t* data, uint8_t len) {
+    uint8_t crc = 0;
+    while (len--) {
+        uint8_t inbyte = *data++;
+        for (uint8_t i = 8; i; i--) {
+            uint8_t mix = (crc ^ inbyte) & 0x01;
+            crc >>= 1;
+            if (mix) crc ^= 0x8C;
+            inbyte >>= 1;
+        }
+    }
+    return crc;
+}
+
+static bool probe_1wire_device(uint8_t gnd_idx, uint8_t dq_idx, uint8_t vdd_idx) {
+    // Power pins: GND = LOW, VDD = HIGH
+    pinMode(PROBES[gnd_idx].pin_rl, OUTPUT);
+    digitalWrite(PROBES[gnd_idx].pin_rl, LOW);
+    pinMode(PROBES[gnd_idx].pin_direct, OUTPUT);
+    digitalWrite(PROBES[gnd_idx].pin_direct, LOW);
+
+    pinMode(PROBES[vdd_idx].pin_rl, OUTPUT);
+    digitalWrite(PROBES[vdd_idx].pin_rl, HIGH);
+    pinMode(PROBES[vdd_idx].pin_direct, OUTPUT);
+    digitalWrite(PROBES[vdd_idx].pin_direct, HIGH);
+
+    uint32_t dq_pin = PROBES[dq_idx].pin_direct;
+    pinMode(PROBES[dq_idx].pin_rl, INPUT);
+    pinMode(PROBES[dq_idx].pin_rh, INPUT);
+    onewire_release(dq_pin);
+
+    delay(10); // Power-on settle
+
+    if (!onewire_reset_pulse(dq_pin)) {
+        release_probes();
+        return false;
+    }
+
+    // Read ROM (0x33)
+    onewire_write_byte(dq_pin, 0x33);
+    uint8_t rom[8];
+    for (int i = 0; i < 8; i++) {
+        rom[i] = onewire_read_byte(dq_pin);
+    }
+
+    if (onewire_crc8(rom, 7) != rom[7] || rom[0] == 0x00 || rom[0] == 0xFF) {
+        release_probes();
+        return false;
+    }
+
+    if (rom[0] == 0x28 || rom[0] == 0x10 || rom[0] == 0x22) {
+        if (!onewire_reset_pulse(dq_pin)) { release_probes(); return false; }
+        onewire_write_byte(dq_pin, 0xCC);
+        onewire_write_byte(dq_pin, 0x44);
+
+        uint32_t t_start = millis();
+        while (onewire_read_bit(dq_pin) == 0) {
+            if (millis() - t_start > 150) break;
+        }
+
+        if (!onewire_reset_pulse(dq_pin)) { release_probes(); return false; }
+        onewire_write_byte(dq_pin, 0xCC);
+        onewire_write_byte(dq_pin, 0xBE);
+
+        uint8_t sp[9];
+        for (int i = 0; i < 9; i++) {
+            sp[i] = onewire_read_byte(dq_pin);
+        }
+
+        if (onewire_crc8(sp, 8) == sp[8]) {
+            int16_t raw_temp = (int16_t)((sp[1] << 8) | sp[0]);
+            float tc = 0;
+            if (rom[0] == 0x10) {
+                tc = (float)(raw_temp >> 1) - 0.25f + ((float)(sp[7] - sp[6]) / (float)(sp[7] ? sp[7] : 1));
+            } else {
+                tc = (float)raw_temp * 0.0625f;
+            }
+            float tf = tc * 1.8f + 32.0f;
+
+            strcpy(comp_res.type, (rom[0] == 0x28) ? "DS18B20" : (rom[0] == 0x10) ? "DS18S20" : "DS1822");
+            snprintf(comp_res.value, sizeof(comp_res.value), "%d.%01dC (%dF)", 
+                     (int)tc, abs((int)(tc * 10) % 10), (int)tf);
+            snprintf(comp_res.pinout, sizeof(comp_res.pinout), "%d:GND %d:DQ %d:VDD",
+                     PROBES[gnd_idx].idx, PROBES[dq_idx].idx, PROBES[vdd_idx].idx);
+
+            rtt.printf(">> [1-WIRE DETECTED] %s: %s | %s | ROM: %02X-%02X%02X%02X%02X%02X%02X-%02X\n",
+                       comp_res.type, comp_res.value, comp_res.pinout,
+                       rom[0], rom[6], rom[5], rom[4], rom[3], rom[2], rom[1], rom[7]);
+
+            test_success_chime();
+            release_probes();
+            return true;
+        }
+    }
+
+    strcpy(comp_res.type, "1-WIRE");
+    snprintf(comp_res.value, sizeof(comp_res.value), "ROM:%02X%02X%02X%02X", rom[0], rom[1], rom[2], rom[3]);
+    snprintf(comp_res.pinout, sizeof(comp_res.pinout), "%d:GND %d:DQ %d:VDD",
+             PROBES[gnd_idx].idx, PROBES[dq_idx].idx, PROBES[vdd_idx].idx);
+    rtt.printf(">> [1-WIRE] Generic 1-Wire device found! %s\n", comp_res.value);
+    test_success_chime();
+    release_probes();
+    return true;
+}
+
+// ============================================================================
+// DHT11 / DHT22 SENSOR ENGINE
+// ============================================================================
+static bool probe_dht_sensor(uint8_t vdd_idx, uint8_t dat_idx, uint8_t gnd_idx) {
+    pinMode(PROBES[vdd_idx].pin_rl, OUTPUT); digitalWrite(PROBES[vdd_idx].pin_rl, HIGH);
+    pinMode(PROBES[vdd_idx].pin_direct, OUTPUT); digitalWrite(PROBES[vdd_idx].pin_direct, HIGH);
+
+    pinMode(PROBES[gnd_idx].pin_rl, OUTPUT); digitalWrite(PROBES[gnd_idx].pin_rl, LOW);
+    pinMode(PROBES[gnd_idx].pin_direct, OUTPUT); digitalWrite(PROBES[gnd_idx].pin_direct, LOW);
+
+    uint32_t dat_pin = PROBES[dat_idx].pin_direct;
+    pinMode(PROBES[dat_idx].pin_rl, INPUT);
+    pinMode(PROBES[dat_idx].pin_rh, INPUT);
+    pinMode(dat_pin, INPUT_PULLUP);
+    delay(20);
+
+    if (digitalRead(dat_pin) == LOW) {
+        release_probes();
+        return false;
+    }
+
+    pinMode(dat_pin, OUTPUT);
+    digitalWrite(dat_pin, LOW);
+    delay(20);
+    pinMode(dat_pin, INPUT_PULLUP);
+    delayMicroseconds(35);
+
+    if (digitalRead(dat_pin) != LOW) {
+        release_probes();
+        return false;
+    }
+
+    uint32_t to = micros();
+    while (digitalRead(dat_pin) == LOW) {
+        if (micros() - to > 120) { release_probes(); return false; }
+    }
+    to = micros();
+    while (digitalRead(dat_pin) == HIGH) {
+        if (micros() - to > 120) { release_probes(); return false; }
+    }
+
+    uint8_t data[5] = {0};
+    for (int i = 0; i < 40; i++) {
+        to = micros();
+        while (digitalRead(dat_pin) == LOW) {
+            if (micros() - to > 80) { release_probes(); return false; }
+        }
+        uint32_t t_start = micros();
+        to = micros();
+        while (digitalRead(dat_pin) == HIGH) {
+            if (micros() - to > 100) { release_probes(); return false; }
+        }
+        uint32_t pulse_len = micros() - t_start;
+        if (pulse_len > 45) {
+            data[i / 8] |= (1 << (7 - (i % 8)));
+        }
+    }
+
+    uint8_t sum = data[0] + data[1] + data[2] + data[3];
+    if (sum != data[4] || (data[0] == 0 && data[2] == 0)) {
+        release_probes();
+        return false;
+    }
+
+    strcpy(comp_res.type, "DHT11");
+    snprintf(comp_res.value, sizeof(comp_res.value), "H:%u%% T:%u C", data[0], data[2]);
+    snprintf(comp_res.pinout, sizeof(comp_res.pinout), "%d:VDD %d:DAT %d:GND",
+             PROBES[vdd_idx].idx, PROBES[dat_idx].idx, PROBES[gnd_idx].idx);
+    rtt.printf(">> [DHT DETECTED] DHT11: %s (%s)\n", comp_res.value, comp_res.pinout);
+
+    test_success_chime();
+    release_probes();
+    return true;
+}
+
 static void run_component_test() {
-    rtt.println(">> [TESTER] Running full component test (BJT, MOSFET, Diode, Resistor, Capacitor)...");
+    rtt.println(">> [TESTER] Running full component test (BJT, MOSFET, Diode, Resistor, Capacitor, 1-Wire)...");
     beep_square(3200, 30);
 
     uint32_t vcc = read_vcc_mv();
@@ -613,6 +873,20 @@ static void run_component_test() {
     comp_res.s1_mv = (adc_read_value(PA_3, 12) * vcc) / 4095;
     comp_res.s2_mv = (adc_read_value(PA_4, 12) * vcc) / 4095;
     comp_res.s3_mv = (adc_read_value(PA_5, 12) * vcc) / 4095;
+
+    // ------------------------------------------------------------------------
+    // STAGE 0: PROBE DIGITAL SENSORS (DS18B20 1-WIRE & DHT11 / DHT22)
+    // ------------------------------------------------------------------------
+    if (probe_1wire_device(0, 1, 2) || probe_1wire_device(2, 1, 0) ||
+        probe_1wire_device(1, 0, 2) || probe_1wire_device(1, 2, 0)) {
+        release_probes();
+        return;
+    }
+
+    if (probe_dht_sensor(0, 1, 2) || probe_dht_sensor(2, 1, 0)) {
+        release_probes();
+        return;
+    }
 
     // ------------------------------------------------------------------------
     // STAGE 1: SCAN ALL 6 DIODE COMBINATIONS (Pairs 1-2, 2-3, 1-3 in both directions)
@@ -645,6 +919,7 @@ static void run_component_test() {
             snprintf(comp_res.pinout, sizeof(comp_res.pinout), "B:%d C:%d E:%d", base, col, em);
             snprintf(comp_res.value, sizeof(comp_res.value), "Vf=%lu.%02luV", avg_vf / 1000, (avg_vf % 1000) / 10);
             rtt.printf(">> [COMPONENT DETECTED] NPN BJT: %s (%s)\n", comp_res.value, comp_res.pinout);
+            test_success_chime();
             release_probes();
             return;
         }
@@ -660,6 +935,7 @@ static void run_component_test() {
             snprintf(comp_res.pinout, sizeof(comp_res.pinout), "B:%d C:%d E:%d", base, col, em);
             snprintf(comp_res.value, sizeof(comp_res.value), "Vf=%lu.%02luV", avg_vf / 1000, (avg_vf % 1000) / 10);
             rtt.printf(">> [COMPONENT DETECTED] PNP BJT: %s (%s)\n", comp_res.value, comp_res.pinout);
+            test_success_chime();
             release_probes();
             return;
         }
@@ -670,6 +946,7 @@ static void run_component_test() {
                  found_diodes[0].a, found_diodes[0].k, found_diodes[1].a, found_diodes[1].k);
         snprintf(comp_res.value, sizeof(comp_res.value), "Vf=%u,%umV", found_diodes[0].vf_mv, found_diodes[1].vf_mv);
         rtt.printf(">> [COMPONENT DETECTED] DUAL DIODE: %s (%s)\n", comp_res.value, comp_res.pinout);
+        test_success_chime();
         release_probes();
         return;
 
@@ -726,6 +1003,7 @@ static void run_component_test() {
             snprintf(comp_res.value, sizeof(comp_res.value), "Vf=%lu.%02luV", 
                      (uint32_t)found_diodes[0].vf_mv / 1000, ((uint32_t)found_diodes[0].vf_mv % 1000) / 10);
             rtt.printf(">> [COMPONENT DETECTED] N-CH MOSFET: %s (%s)\n", comp_res.value, comp_res.pinout);
+            test_success_chime();
             return;
         }
 
@@ -764,6 +1042,7 @@ static void run_component_test() {
             snprintf(comp_res.value, sizeof(comp_res.value), "Vf=%lu.%02luV", 
                      (uint32_t)found_diodes[0].vf_mv / 1000, ((uint32_t)found_diodes[0].vf_mv % 1000) / 10);
             rtt.printf(">> [COMPONENT DETECTED] P-CH MOSFET: %s (%s)\n", comp_res.value, comp_res.pinout);
+            test_success_chime();
             return;
         }
 
@@ -773,6 +1052,7 @@ static void run_component_test() {
         snprintf(comp_res.value, sizeof(comp_res.value), "Vf=%lu.%02luV", 
                  (uint32_t)found_diodes[0].vf_mv / 1000, ((uint32_t)found_diodes[0].vf_mv % 1000) / 10);
         rtt.printf(">> [COMPONENT DETECTED] DIODE: %s (%s)\n", comp_res.value, comp_res.pinout);
+        test_success_chime();
         release_probes();
         return;
     }
@@ -1037,6 +1317,27 @@ void loop() {
         }
     } else {
         pwr_press_start = 0;
+    }
+
+    // 5-minute Auto Power-Off (Battery Saver)
+    static uint32_t last_activity_time = 0;
+    if (last_activity_time == 0) last_activity_time = millis();
+    if (b_up || b_down || b_ok || b_test || b_menu || b_pwr || ir_active) {
+        last_activity_time = millis();
+    }
+    if (millis() - last_activity_time > 300000UL) {
+        rtt.println(">> [AUTO POWER-OFF] Inactivity timeout (5 min). Conserving Li-Po battery...");
+        beep_square(3000, 60);
+        delay(30);
+        beep_square(2000, 80);
+        delay(30);
+        beep_square(1000, 120);
+        digitalWrite(PIN_PWR_HOLD, LOW);
+        digitalWrite(PIN_BACKLIGHT, LOW);
+        while (1) {
+            digitalWrite(PIN_PWR_HOLD, LOW);
+            delay(100);
+        }
     }
 
     // Status Mask & Active Key

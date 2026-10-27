@@ -161,7 +161,7 @@ graph TD
 | **9** | `VDDA` | Analog Power | 3.3V Filtered Rail | Power | Clean Analog VDD |
 | **10** | `PA0` | `ADC12_IN0` | Scope MCX Analog Front-End | Input | High-speed ADC sampling input |
 | **11** | `PA1` | `ADC_IN1 / TIM2` | Signal Generator Output | Reserved | PWM / DAC Waveform Generator |
-| **12** | `PA2` | `ADC_IN2` | Battery Voltage Monitor | Reserved | Battery divider sense |
+| **12** | `PA2` | `ADC12_IN2` | Li-Po Battery Voltage Sense | **ACTIVE** | Direct register ADC sampling 2:1 divider (0-4.2V), drives live UI battery gauge & percentage |
 | **17** | `PA7` | `GPIO` | **LCD `D0` Parallel Tap** | Output | Synchronously mirrored with `PB0` for bus speed |
 | **18** | `PB0` | `GPIO` | **LCD `D0`** | Output | 16-Bit Parallel Data Bit 0 |
 | **19** | `PB1` | `GPIO` | **LCD `D1`** | Output | 16-Bit Parallel Data Bit 1 |

@@ -29,7 +29,7 @@ struct L083Telemetry {
     // Component Tester Fields
     char comp_type[16];   // "NONE", "RESISTOR", "DIODE", "CAPACITOR", "SHORT"
     char comp_val[24];    // "1.00 kOhm", "100.0 nF", "Vf=0.68V"
-    char comp_pinout[20]; // "Pins 1 - 2", "1(A) -> 2(K)"
+    char comp_pinout[28]; // "Pins 1 - 2", "1(A) -> 2(K)", "1:GND 2:DQ 3:VDD"
     uint16_t s1_mv;
     uint16_t s2_mv;
     uint16_t s3_mv;
@@ -45,6 +45,80 @@ static L083Telemetry l083_data = {
     0, "STANDBY"
 };
 static char last_raw_pkt[64] = "Waiting for UART...";
+
+// Li-Po Battery Monitor (Direct register ADC on PA2 with 2:1 hardware voltage divider)
+static uint16_t batt_mv = 3800;
+static uint8_t  batt_pct = 75;
+static uint8_t  prev_batt_pct = 0xFF;
+static uint16_t prev_batt_mv = 0;
+
+static uint16_t adc_read_pa2() {
+    RCC->APB2ENR |= (RCC_APB2ENR_ADC1EN | RCC_APB2ENR_IOPAEN);
+    GPIOA->CRL &= ~(0x0FUL << 8); // PA2 analog input mode (MODE2=00, CNF2=00)
+    ADC1->CR2 |= ADC_CR2_ADON;
+    ADC1->SQR3 = 2; // Channel 2 (PA2)
+    ADC1->CR2 |= ADC_CR2_SWSTART;
+    uint32_t to = 2000;
+    while (!(ADC1->SR & ADC_SR_EOC) && --to);
+    return (uint16_t)ADC1->DR;
+}
+
+static void update_battery() {
+    static uint32_t last_sample = 0;
+    if (millis() - last_sample < 300) return;
+    last_sample = millis();
+
+    uint32_t sum = 0;
+    for (int i = 0; i < 8; i++) {
+        sum += adc_read_pa2();
+    }
+    uint32_t raw_avg = sum / 8;
+
+    // 12-bit ADC (3300 mV VREF) and 2:1 hardware divider (Vbatt = 2 * Vadc):
+    // Vbatt = raw * 6600 / 4095
+    uint32_t measured_mv = (raw_avg * 6600UL) / 4095UL;
+
+    if (batt_mv == 3800 && prev_batt_pct == 0xFF) batt_mv = measured_mv;
+    else batt_mv = (batt_mv * 3 + measured_mv) / 4;
+
+    // Li-Po discharge curve (3.30V = 0%, 4.18V = 100%)
+    if (batt_mv <= 3300) {
+        batt_pct = 0;
+    } else if (batt_mv >= 4180) {
+        batt_pct = 100;
+    } else {
+        batt_pct = (uint8_t)(((uint32_t)(batt_mv - 3300) * 100UL) / (4180UL - 3300UL));
+    }
+}
+
+static void draw_battery_indicator(bool force_redraw) {
+    if (!force_redraw && batt_pct == prev_batt_pct && abs((int)batt_mv - (int)prev_batt_mv) < 30) {
+        return;
+    }
+    prev_batt_pct = batt_pct;
+    prev_batt_mv = batt_mv;
+
+    // Percentage string (X: 240..272, Y: 7)
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%3u%%", batt_pct);
+    tft_print(240, 7, buf, COLOR_WHITE, 0x0010, 1);
+
+    // Battery Shell (X: 278, Y: 5, W: 28, H: 14)
+    tft_draw_rect(278, 5, 28, 14, COLOR_WHITE);
+    // Positive Pip (X: 306, Y: 8, W: 3, H: 8)
+    tft_fill_rect(306, 8, 3, 8, COLOR_WHITE);
+
+    // Inner Fill (X: 280, Y: 7, max W: 24, H: 10)
+    uint8_t fill_w = (batt_pct * 24) / 100;
+    uint16_t col = (batt_pct > 50) ? COLOR_GREEN : (batt_pct > 20) ? COLOR_YELLOW : COLOR_RED;
+
+    if (fill_w > 0) {
+        tft_fill_rect(280, 7, fill_w, 10, col);
+    }
+    if (fill_w < 24) {
+        tft_fill_rect(280 + fill_w, 7, 24 - fill_w, 10, 0x0010);
+    }
+}
 
 // Decoded Infrared Receiver Telemetry
 struct IrRxTelemetry {
@@ -119,12 +193,12 @@ static void parse_packet(const char* pkt) {
     uint32_t seq, vcc, uptime;
     char btn_str[24], pin_str[16];
     unsigned int mask_val, bl_val;
-    char type_str[16] = "NONE", val_str[24] = "No component", pinout_str[20] = "---";
+    char type_str[16] = "NONE", val_str[24] = "No component", pinout_str[28] = "---";
     unsigned int s1_v = 0, s2_v = 0, s3_v = 0;
     unsigned long zener_v = 0;
     char zener_stat_str[24] = "STANDBY";
 
-    int n = sscanf(pkt + 5, "%lu,%23[^,],%15[^,],%x,%u,%lu,%lu,%15[^,],%23[^,],%19[^,],%u,%u,%u,%lu,%23[^\n\r*]",
+    int n = sscanf(pkt + 5, "%lu,%23[^,],%15[^,],%x,%u,%lu,%lu,%15[^,],%23[^,],%27[^,],%u,%u,%u,%lu,%23[^\n\r*]",
                    &seq, btn_str, pin_str, &mask_val, &bl_val, &vcc, &uptime,
                    type_str, val_str, pinout_str, &s1_v, &s2_v, &s3_v,
                    &zener_v, zener_stat_str);
@@ -209,8 +283,8 @@ static void tft_draw_circle_placeholder(int16_t cx, int16_t cy) {
 
 // Draw Component Schematic Symbol & Mini ZIF Socket
 static void draw_schematic_graphic(const char* type, const char* pinout) {
-    // 1. Left Schematic Canvas: X: 10..220, Y: 30..76 (Center Y = 53)
-    tft_fill_rect(10, 30, 210, 46, COLOR_BLACK);
+    // 1. Left Schematic Canvas: X: 6..222, Y: 28..132
+    tft_fill_rect(6, 28, 216, 104, COLOR_BLACK);
 
     // Extract terminal indices dynamically from pinout string (e.g. "Pins 1 - 2", "3(A) -> 2(K)", "B:1 C:2 E:3")
     char pA = '1', pB = '2', pC = '0';
@@ -294,7 +368,6 @@ static void draw_schematic_graphic(const char* type, const char* pinout) {
         tft_draw_hline(34, 53, 58, COLOR_WHITE);
 
         // Standard Electronic Diode Symbol:
-        // Flat Base on Left at X=92, Pointing Right to tip at X=110 touching Cathode Bar at X=111
         for (int i = 0; i <= 18; i++) {
             int16_t h = 20 - (i * 20) / 18;
             tft_draw_vline(92 + i, 53 - h / 2, h, COLOR_GREEN);
@@ -394,6 +467,84 @@ static void draw_schematic_graphic(const char* type, const char* pinout) {
         tft_draw_rect(186, 42, 20, 22, COLOR_RED);
         tft_draw_char(192, 46, pB, COLOR_RED, COLOR_NAVY, 1);
 
+    } else if (strcmp(type, "DS18B20") == 0 || strcmp(type, "DS18S20") == 0 || strcmp(type, "DS1822") == 0) {
+        // TO-92 Digital Temp Sensor Body (X: 68..148, Y: 32..64)
+        tft_fill_rect(68, 32, 80, 32, 0x2104);
+        tft_draw_rect(68, 32, 80, 32, COLOR_LIGHTGREY);
+
+        // Mercury Thermometer Graphic inside package
+        tft_fill_rect(76, 36, 4, 16, COLOR_WHITE);
+        tft_fill_rect(75, 50, 6, 6, COLOR_RED);
+        tft_fill_rect(76, 42, 4, 9, COLOR_RED);
+        tft_print(86, 37, "DS18B20", COLOR_CYAN, 0x2104, 1);
+        tft_print(86, 49, "1-WIRE", COLOR_YELLOW, 0x2104, 1);
+
+        // 3 Leads going down to badges:
+        // Lead 1: GND
+        tft_draw_vline(80, 64, 14, COLOR_WHITE);
+        tft_fill_rect(62, 78, 36, 18, COLOR_NAVY);
+        tft_draw_rect(62, 78, 36, 18, COLOR_CYAN);
+        tft_print(64, 83, "1:GND", COLOR_CYAN, COLOR_NAVY, 1);
+
+        // Lead 2: DQ
+        tft_draw_vline(108, 64, 14, COLOR_WHITE);
+        tft_fill_rect(100, 78, 30, 18, COLOR_NAVY);
+        tft_draw_rect(100, 78, 30, 18, COLOR_YELLOW);
+        tft_print(103, 83, "2:DQ", COLOR_YELLOW, COLOR_NAVY, 1);
+
+        // Lead 3: VDD
+        tft_draw_vline(136, 64, 14, COLOR_WHITE);
+        tft_fill_rect(132, 78, 36, 18, COLOR_NAVY);
+        tft_draw_rect(132, 78, 36, 18, COLOR_RED);
+        tft_print(134, 83, "3:VDD", COLOR_RED, COLOR_NAVY, 1);
+
+    } else if (strcmp(type, "DHT11") == 0 || strcmp(type, "DHT22") == 0) {
+        // DHT Blue Sensor Case
+        tft_fill_rect(68, 30, 80, 36, COLOR_BLUE);
+        tft_draw_rect(68, 30, 80, 36, COLOR_CYAN);
+        tft_draw_hline(74, 36, 68, COLOR_DARKCYAN);
+        tft_draw_hline(74, 42, 68, COLOR_DARKCYAN);
+        tft_print(74, 48, "DHT SENSOR", COLOR_WHITE, COLOR_BLUE, 1);
+
+        // Leads: 1:VDD, 2:DAT, 3:GND
+        tft_draw_vline(80, 66, 12, COLOR_WHITE);
+        tft_fill_rect(62, 78, 36, 18, COLOR_NAVY);
+        tft_draw_rect(62, 78, 36, 18, COLOR_RED);
+        tft_print(64, 83, "1:VDD", COLOR_RED, COLOR_NAVY, 1);
+
+        tft_draw_vline(108, 66, 12, COLOR_WHITE);
+        tft_fill_rect(100, 78, 32, 18, COLOR_NAVY);
+        tft_draw_rect(100, 78, 32, 18, COLOR_YELLOW);
+        tft_print(102, 83, "2:DAT", COLOR_YELLOW, COLOR_NAVY, 1);
+
+        tft_draw_vline(136, 66, 12, COLOR_WHITE);
+        tft_fill_rect(134, 78, 36, 18, COLOR_NAVY);
+        tft_draw_rect(134, 78, 36, 18, COLOR_CYAN);
+        tft_print(136, 83, "3:GND", COLOR_CYAN, COLOR_NAVY, 1);
+
+    } else if (strcmp(type, "CONTINUITY") == 0) {
+        // Continuity Sound Waves
+        tft_fill_rect(14, 42, 20, 22, COLOR_NAVY);
+        tft_draw_rect(14, 42, 20, 22, COLOR_YELLOW);
+        tft_draw_char(20, 46, pA, COLOR_YELLOW, COLOR_NAVY, 1);
+
+        tft_fill_rect(34, 51, 152, 5, COLOR_YELLOW);
+
+        // Sound waves: radiating bars and center dot
+        tft_fill_rect(104, 50, 6, 7, COLOR_YELLOW);
+        // Inner wave
+        tft_draw_line(96, 44, 96, 62, COLOR_GREEN);
+        tft_draw_line(118, 44, 118, 62, COLOR_GREEN);
+        // Outer wave
+        tft_draw_line(90, 40, 90, 66, COLOR_CYAN);
+        tft_draw_line(124, 40, 124, 66, COLOR_CYAN);
+
+        tft_print(64, 33, "(( BEEP! ))", COLOR_YELLOW, COLOR_BLACK, 1);
+
+        tft_fill_rect(186, 42, 20, 22, COLOR_NAVY);
+        tft_draw_rect(186, 42, 20, 22, COLOR_YELLOW);
+        tft_draw_char(192, 46, pB, COLOR_YELLOW, COLOR_NAVY, 1);
+
     } else {
         // Idle: Open Leads with question mark
         tft_draw_hline(18, 53, 66, COLOR_DARKGREY);
@@ -408,9 +559,11 @@ static void draw_schematic_graphic(const char* type, const char* pinout) {
     tft_fill_rect(227, 34, 9, 94, 0x001F);  // Blue locking lever
 
     // 3 Pin Holes
-    bool s1_act = !is_open && (pA == '1' || pB == '1' || pC == '1');
-    bool s2_act = !is_open && (pA == '2' || pB == '2' || pC == '2');
-    bool s3_act = !is_open && (pA == '3' || pB == '3' || pC == '3');
+    bool is_sensor = (strcmp(type, "DS18B20") == 0 || strcmp(type, "DS18S20") == 0 || 
+                      strcmp(type, "DS1822") == 0 || strcmp(type, "DHT11") == 0 || strcmp(type, "DHT22") == 0);
+    bool s1_act = is_sensor || (!is_open && (pA == '1' || pB == '1' || pC == '1'));
+    bool s2_act = is_sensor || (!is_open && (pA == '2' || pB == '2' || pC == '2'));
+    bool s3_act = is_sensor || (!is_open && (pA == '3' || pB == '3' || pC == '3'));
 
     tft_fill_rect(242, 36, 62, 26, s1_act ? COLOR_GREEN : COLOR_BLACK);
     tft_draw_rect(242, 36, 62, 26, s1_act ? COLOR_WHITE : COLOR_DARKGREY);
@@ -469,10 +622,10 @@ static void draw_zener_graphic(uint32_t zener_mv, const char* status) {
     if (zener_mv > 24000) {
         tft_print(16, 96, "Vz: >28.0V (OPEN / NO DIODE) ", COLOR_LIGHTGREY, COLOR_BLACK, 2);
     } else if (zener_mv >= 1000) {
-        snprintf(buf, sizeof(buf), "Vz: %4.2f V  (ZENER CLAMP)", zener_mv / 1000.0f);
+        snprintf(buf, sizeof(buf), "Vz: %lu.%02lu V  (ZENER CLAMP)", zener_mv / 1000, (zener_mv % 1000) / 10);
         tft_print(16, 96, buf, COLOR_GREEN, COLOR_BLACK, 2);
     } else if (zener_mv >= 350) {
-        snprintf(buf, sizeof(buf), "Vf: %4.2f V  (FORWARD DIODE)", zener_mv / 1000.0f);
+        snprintf(buf, sizeof(buf), "Vf: %lu.%02lu V  (FORWARD DIODE)", zener_mv / 1000, (zener_mv % 1000) / 10);
         tft_print(16, 96, buf, COLOR_CYAN, COLOR_BLACK, 2);
     } else {
         tft_print(16, 96, "SHORT CIRCUIT (< 0.2V)      ", COLOR_RED, COLOR_BLACK, 2);
@@ -489,8 +642,8 @@ static void draw_screen_background() {
 
     if (screen_mode == 0) {
         // Mode 0: Hardware Console
-        tft_print(8, 7, "DSO-TC2 HARDWARE CONSOLE", COLOR_YELLOW, 0x0010, 1);
-        tft_print(232, 7, "[M] TESTER ", COLOR_CYAN, 0x0010, 1);
+        tft_print(8, 7, "CONSOLE", COLOR_YELLOW, 0x0010, 1);
+        tft_print(110, 7, "[M] TESTER", COLOR_CYAN, 0x0010, 1);
 
         // Card 1: Keypad Matrix (Y: 26..136)
         tft_fill_rect(4, 26, 312, 110, COLOR_BLACK);
@@ -502,8 +655,8 @@ static void draw_screen_background() {
 
     } else if (screen_mode == 1) {
         // Mode 1: Graphical Component Tester Console
-        tft_print(8, 7, "DSO-TC2 COMPONENT TESTER", COLOR_YELLOW, 0x0010, 1);
-        tft_print(232, 7, "[M] IR DEC ", COLOR_CYAN, 0x0010, 1);
+        tft_print(8, 7, "TESTER", COLOR_YELLOW, 0x0010, 1);
+        tft_print(110, 7, "[M] IR DEC", COLOR_CYAN, 0x0010, 1);
 
         // Card 1: Schematic Graphic Window (Y: 26..136)
         tft_fill_rect(4, 26, 312, 110, COLOR_BLACK);
@@ -515,8 +668,8 @@ static void draw_screen_background() {
 
     } else if (screen_mode == 2) {
         // Mode 2: Infrared Remote Decoder Console
-        tft_print(8, 7, "DSO-TC2 IR DECODER (38k)", COLOR_YELLOW, 0x0010, 1);
-        tft_print(232, 7, "[M] ZENER  ", COLOR_CYAN, 0x0010, 1);
+        tft_print(8, 7, "IR DECODER", COLOR_YELLOW, 0x0010, 1);
+        tft_print(110, 7, "[M] ZENER ", COLOR_CYAN, 0x0010, 1);
 
         // Card 1: IR Decoder Dashboard (Y: 26..136)
         tft_fill_rect(4, 26, 312, 110, COLOR_BLACK);
@@ -528,8 +681,8 @@ static void draw_screen_background() {
 
     } else {
         // Mode 3: High-Voltage Zener Diode Tester
-        tft_print(8, 7, "DSO-TC2 ZENER TESTER(30V)", COLOR_YELLOW, 0x0010, 1);
-        tft_print(232, 7, "[M] CONSOLE", COLOR_CYAN, 0x0010, 1);
+        tft_print(8, 7, "ZENER(30V)", COLOR_YELLOW, 0x0010, 1);
+        tft_print(110, 7, "[M] CONSOLE", COLOR_CYAN, 0x0010, 1);
 
         // Card 1: Zener Schematic Window (Y: 26..136)
         tft_fill_rect(4, 26, 312, 110, COLOR_BLACK);
@@ -539,6 +692,8 @@ static void draw_screen_background() {
         tft_fill_rect(4, 138, 312, 98, COLOR_BLACK);
         tft_draw_rect(4, 138, 312, 98, COLOR_CYAN);
     }
+
+    draw_battery_indicator(true);
 }
 
 void setup() {
@@ -546,6 +701,7 @@ void setup() {
     Serial1.setRx(PA10);
     Serial1.setTx(PA9);
     Serial1.begin(38400);
+    update_battery();
     draw_screen_background();
 }
 
@@ -572,6 +728,8 @@ void loop() {
     if (millis() - last_ui >= 50) { // 20 Hz UI refresh
         last_ui = millis();
         poll_uart();
+        update_battery();
+        draw_battery_indicator(need_full_redraw);
 
         bool b_up    = (m & 0x01) != 0;
         bool b_down  = (m & 0x02) != 0;
@@ -625,12 +783,13 @@ void loop() {
             tft_print(10, 192, buf, COLOR_WHITE, COLOR_BLACK, 1);
 
             if (l083_data.connected) {
-                snprintf(buf, sizeof(buf), "VCC:%0.2fV | L083:ONLINE (%lu pkts)  ",
-                         l083_data.vcc_mv / 1000.0f, l083_data.total_packets);
+                snprintf(buf, sizeof(buf), "VCC:%lu.%02luV | BATT:%lu.%02luV (%u%%)  ",
+                         l083_data.vcc_mv / 1000, (l083_data.vcc_mv % 1000) / 10,
+                         (uint32_t)batt_mv / 1000, ((uint32_t)batt_mv % 1000) / 10, batt_pct);
                 tft_print(10, 208, buf, 0x07E0, COLOR_BLACK, 1);
             } else {
-                snprintf(buf, sizeof(buf), "L083 OFFLINE (RX:%lu B, Pkt:%lu) ",
-                         raw_rx_bytes, l083_data.total_packets);
+                snprintf(buf, sizeof(buf), "OFFLINE | BATT:%lu.%02luV (%u%%)    ",
+                         (uint32_t)batt_mv / 1000, ((uint32_t)batt_mv % 1000) / 10, batt_pct);
                 tft_print(10, 208, buf, COLOR_RED, COLOR_BLACK, 1);
             }
 
@@ -714,12 +873,13 @@ void loop() {
             tft_print(12, 212, "TEST=Measure | MENU=Switch IR Dec ", 0x07E0, COLOR_BLACK, 1);
 
             if (l083_data.connected) {
-                snprintf(buf, sizeof(buf), "VCC:%0.2fV | LINK:OK (%lu pkts)   ",
-                         l083_data.vcc_mv / 1000.0f, l083_data.total_packets);
+                snprintf(buf, sizeof(buf), "VCC:%lu.%02luV | BATT:%lu.%02luV (%u%%)  ",
+                         l083_data.vcc_mv / 1000, (l083_data.vcc_mv % 1000) / 10,
+                         (uint32_t)batt_mv / 1000, ((uint32_t)batt_mv % 1000) / 10, batt_pct);
                 tft_print(12, 224, buf, COLOR_GREEN, COLOR_BLACK, 1);
             } else {
-                snprintf(buf, sizeof(buf), "LINK:WAITING (RX:%lu B, Pkt:%lu)  ",
-                         raw_rx_bytes, l083_data.total_packets);
+                snprintf(buf, sizeof(buf), "LINK:WAITING | BATT:%lu.%02luV (%u%%)",
+                         (uint32_t)batt_mv / 1000, ((uint32_t)batt_mv % 1000) / 10, batt_pct);
                 tft_print(12, 224, buf, COLOR_RED, COLOR_BLACK, 1);
             }
             poll_uart();
@@ -839,9 +999,11 @@ void loop() {
             if (l083_data.zener_mv > 24000) {
                 snprintf(zbuf, sizeof(zbuf), "Voltage: >28.0 V (Open Circuit)  ");
             } else if (l083_data.zener_mv >= 1000) {
-                snprintf(zbuf, sizeof(zbuf), "Voltage: %4.2f V (Zener Breakdown)", l083_data.zener_mv / 1000.0f);
+                snprintf(zbuf, sizeof(zbuf), "Voltage: %lu.%02lu V (Zener Breakdown)", 
+                         l083_data.zener_mv / 1000, (l083_data.zener_mv % 1000) / 10);
             } else if (l083_data.zener_mv >= 350) {
-                snprintf(zbuf, sizeof(zbuf), "Voltage: %4.2f V (Forward Diode) ", l083_data.zener_mv / 1000.0f);
+                snprintf(zbuf, sizeof(zbuf), "Voltage: %lu.%02lu V (Forward Diode) ", 
+                         l083_data.zener_mv / 1000, (l083_data.zener_mv % 1000) / 10);
             } else {
                 snprintf(zbuf, sizeof(zbuf), "Voltage: <0.20 V (Short Circuit) ");
             }
@@ -852,12 +1014,13 @@ void loop() {
             tft_print(12, 208, "TEST=Sample | MENU=Next Screen   ", 0x07E0, COLOR_BLACK, 1);
 
             if (l083_data.connected) {
-                snprintf(buf, sizeof(buf), "VCC:%0.2fV | LINK:OK (%lu pkts)   ",
-                         l083_data.vcc_mv / 1000.0f, l083_data.total_packets);
+                snprintf(buf, sizeof(buf), "VCC:%lu.%02luV | BATT:%lu.%02luV (%u%%)  ",
+                         l083_data.vcc_mv / 1000, (l083_data.vcc_mv % 1000) / 10,
+                         (uint32_t)batt_mv / 1000, ((uint32_t)batt_mv % 1000) / 10, batt_pct);
                 tft_print(12, 224, buf, COLOR_GREEN, COLOR_BLACK, 1);
             } else {
-                snprintf(buf, sizeof(buf), "LINK:WAITING (RX:%lu B, Pkt:%lu)  ",
-                         raw_rx_bytes, l083_data.total_packets);
+                snprintf(buf, sizeof(buf), "LINK:WAITING | BATT:%lu.%02luV (%u%%)",
+                         (uint32_t)batt_mv / 1000, ((uint32_t)batt_mv % 1000) / 10, batt_pct);
                 tft_print(12, 224, buf, COLOR_RED, COLOR_BLACK, 1);
             }
             poll_uart();

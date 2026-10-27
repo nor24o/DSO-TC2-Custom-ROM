@@ -27,6 +27,20 @@ An open-source, ultra-high-performance Custom ROM and reverse-engineering framew
   - **Full Multi-Junction Analysis**: Automatic detection and pinout identification for BJTs (**NPN** / **PNP**), MOSFETs (**N-Channel** / **P-Channel** with body diode verification), and diodes with exact forward voltage $V_f$.
   - **True Capacitor vs. Resistor Discrimination**: Multi-sample decay filtering prevents capacitive charge transients from being falsely identified as 1.6 M$\Omega$ resistors. Accurately measures from pF up to thousands of µF.
   - **Real-Time Schematic Symbols**: Dynamic electronic schematic glyphs (BJT, MOSFET, Diode, Resistor, Capacitor) with active pin badges ($B, C, E, G, D, S, A, K$) and visual 3-pin ZIF socket highlights.
+- **Live Battery Fuel Gauge & Monitor**:
+  - Monitored directly via 12-bit hardware register ADC on `PA2` (Display MCU) through the onboard 2:1 precision resistor divider.
+  - Features a dynamic color-coded multi-bar battery icon (Green $>50\%$, Yellow $20..50\%$, Red $<20\%$) and live percentage readout ($0..100\%$) across the header of all 4 screens.
+- **Dallas 1-Wire & DHT Digital Sensor Auto-Detection (Screen 1)**:
+  - **Dallas 1-Wire**: Auto-detects **DS18B20**, **DS18S20**, and **DS1822** digital temperature sensors in either normal (`1:GND 2:DQ 3:VDD`) or inverted (`3:GND 2:DQ 1:VDD`) orientation.
+  - Extracts full 64-bit factory laser ROM serial numbers and provides real-time digital temperature readouts in both Celsius (°C) and Fahrenheit (°F).
+  - **Single-Bus Humidity**: Auto-detects **DHT11** / **DHT22** digital temperature and relative humidity (%RH) sensors.
+  - Displays dedicated TO-92 and sensor casing schematic glyphs with mercury thermometer graphics and active pin badges.
+- **Acoustic Continuity Beeper & Multi-Tone Audio Engine**:
+  - **Continuity Buzzer**: Low socket resistance ($< 30\,\Omega$) fires an instant loud continuity tone on `PC6` with radiating sound wave schematic glyphs `(( BEEP! ))`.
+  - **Melodic Completion Chime**: Sweet 2-tone chime upon completing any component test.
+  - **Tactile Key Clicks**: Instant acoustic feedback on every physical button press.
+- **Auto Power-Off (Battery Saver)**:
+  - Conserves Li-Po battery life with a graceful 5-minute inactivity shutdown sequence releasing soft-latch `PB7`.
 - **Dedicated 38 kHz IR Remote Protocol Decoder (Screen 2)**:
   - Hardware EXTI timer engine decoding NEC, Samsung, and Sony pulse-distance encoded protocols.
   - Clean non-overlapping display dashboard: Size-2 Command Hex/Dec, 16-bit Address, 32-bit Raw code, dynamic 32-bit bitstream visualizer, and live 3-key history log.
