@@ -93,14 +93,11 @@ static const size_t NUM_ZENER_EN = sizeof(CANDIDATE_ZENER_EN) / sizeof(CANDIDATE
 
 // ============================================================================
 // ============================================================================
-// HARDWARE DMA-ACCELERATED SIGNAL GENERATOR (TIM6 + DMA1_CH2 -> GPIOB->BSRR)
-// ZERO CPU CYCLES / ZERO INTERRUPTS / 100% UNLOCK UP TO 100 kHz
+// BARE-METAL HARDWARE TIMER (TIM6) SIGNAL GENERATOR (DIRECT IOPORT BIT-BANG)
+// RAM VECTOR DISPATCH / ZERO HAL WRAPPER OVERHEAD / 100 kHz UNLOCKED
 // ============================================================================
 #define BSRR_PB8_HI  (1U << 8)
 #define BSRR_PB8_LO  (1U << 24)
-
-static uint32_t dma_wave_buf[32];
-static uint16_t dma_wave_len = 2;
 
 static const uint32_t SIGGEN_PRESETS[] = {
     10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000
@@ -122,83 +119,48 @@ static const uint8_t NUM_WAVE_MODES = 8;
 static uint8_t siggen_wave_mode = 0; // Default: SQR (50%)
 static bool siggen_on = false;
 
-static void build_dma_wave() {
-    switch (siggen_wave_mode) {
-        case WAVE_SQR:
-            dma_wave_len = 2;
-            dma_wave_buf[0] = BSRR_PB8_HI;
-            dma_wave_buf[1] = BSRR_PB8_LO;
-            break;
+static volatile uint16_t siggen_arr_hi = 16000;
+static volatile uint16_t siggen_arr_lo = 16000;
 
-        case WAVE_P10: // 10% Duty (2 HIGH, 18 LOW)
-            dma_wave_len = 20;
-            for (int i = 0; i < 20; i++) {
-                dma_wave_buf[i] = (i < 2) ? BSRR_PB8_HI : BSRR_PB8_LO;
-            }
-            break;
-
-        case WAVE_P25: // 25% Duty (5 HIGH, 15 LOW)
-            dma_wave_len = 20;
-            for (int i = 0; i < 20; i++) {
-                dma_wave_buf[i] = (i < 5) ? BSRR_PB8_HI : BSRR_PB8_LO;
-            }
-            break;
-
-        case WAVE_P75: // 75% Duty (15 HIGH, 5 LOW)
-            dma_wave_len = 20;
-            for (int i = 0; i < 20; i++) {
-                dma_wave_buf[i] = (i < 15) ? BSRR_PB8_HI : BSRR_PB8_LO;
-            }
-            break;
-
-        case WAVE_P90: // 90% Duty (18 HIGH, 2 LOW)
-            dma_wave_len = 20;
-            for (int i = 0; i < 20; i++) {
-                dma_wave_buf[i] = (i < 18) ? BSRR_PB8_HI : BSRR_PB8_LO;
-            }
-            break;
-
-        case WAVE_TRI: // 20-sample Triangle Wave
-            dma_wave_len = 20;
-            for (int i = 0; i < 20; i++) {
-                int d = (i < 10) ? i : (19 - i);
-                dma_wave_buf[i] = ((i % 4) < (d / 3 + 1)) ? BSRR_PB8_HI : BSRR_PB8_LO;
-            }
-            break;
-
-        case WAVE_SINE: // 20-sample Sine Wave Pulse Distribution
-            dma_wave_len = 20;
-            for (int i = 0; i < 20; i++) {
-                static const uint8_t SINE_PATTERN[20] = {
-                    0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-                };
-                dma_wave_buf[i] = SINE_PATTERN[i] ? BSRR_PB8_HI : BSRR_PB8_LO;
-            }
-            break;
-
-        case WAVE_SAW: // 20-sample Sawtooth Ramp Wave
-            dma_wave_len = 20;
-            for (int i = 0; i < 20; i++) {
-                dma_wave_buf[i] = ((i % 4) < (i / 5 + 1)) ? BSRR_PB8_HI : BSRR_PB8_LO;
-            }
-            break;
-
-        default:
-            dma_wave_len = 2;
-            dma_wave_buf[0] = BSRR_PB8_HI;
-            dma_wave_buf[1] = BSRR_PB8_LO;
-            break;
+// High-speed bare-metal ISR executing directly from RAM vector table (no HAL, no std::function overhead)
+static void siggen_isr_fast(void) {
+    TIM6->SR = 0; // Clear update interrupt flag
+    if (siggen_arr_hi == siggen_arr_lo) {
+        GPIOB->ODR ^= (1U << 8); // Single-cycle toggle for symmetric square waves
+    } else {
+        if (GPIOB->ODR & (1U << 8)) {
+            GPIOB->BSRR = BSRR_PB8_LO; // Set PB8 LOW (0.0V)
+            TIM6->ARR = siggen_arr_lo;
+        } else {
+            GPIOB->BSRR = BSRR_PB8_HI; // Set PB8 HIGH (3.3V)
+            TIM6->ARR = siggen_arr_hi;
+        }
     }
 }
 
+// 256-byte aligned RAM vector table (48 entries * 4 bytes = 192 bytes)
+__attribute__((aligned(256))) static uint32_t ram_vector_table[48];
+
+static void init_ram_vectors() {
+    uint32_t *orig_vectors = (uint32_t *)SCB->VTOR;
+    for (int i = 0; i < 48; i++) {
+        ram_vector_table[i] = orig_vectors[i];
+    }
+    // Route TIM6_DAC_IRQn (IRQ 17) directly to our ultra-lean siggen_isr_fast
+    ram_vector_table[16 + TIM6_DAC_IRQn] = (uint32_t)siggen_isr_fast;
+    __disable_irq();
+    SCB->VTOR = (uint32_t)ram_vector_table;
+    __DSB();
+    __enable_irq();
+}
+
 static void update_siggen() {
-    // 1. Disable timer and DMA channel
+    // 1. Disable TIM6 and NVIC IRQ
+    NVIC_DisableIRQ(TIM6_DAC_IRQn);
     if (RCC->APB1ENR & RCC_APB1ENR_TIM6EN) {
         TIM6->CR1 = 0;
         TIM6->DIER = 0;
-    }
-    if (RCC->AHBENR & RCC_AHBENR_DMA1EN) {
-        DMA1_Channel2->CCR = 0;
+        TIM6->SR = 0;
     }
 
     if (!siggen_on) {
@@ -209,58 +171,62 @@ static void update_siggen() {
 
     pinMode(PIN_SIGGEN, OUTPUT);
     digitalWrite(PIN_SIGGEN, LOW);
+    GPIOB->OSPEEDR |= (3U << 16); // High Speed slew rate on PB8
 
-    // 2. Enable Clocks for TIM6 and DMA1
+    // 2. Enable Clocks for TIM6
     RCC->APB1ENR |= RCC_APB1ENR_TIM6EN;
-    RCC->AHBENR  |= RCC_AHBENR_DMA1EN;
     __asm__ volatile("nop; nop");
 
-    // 3. Build waveform buffer
-    build_dma_wave();
+    // 3. Determine Duty Percentage from Wave Mode
+    uint8_t duty_pct = 50;
+    switch (siggen_wave_mode) {
+        case WAVE_SQR:  duty_pct = 50; break;
+        case WAVE_TRI:  duty_pct = 50; break;
+        case WAVE_SINE: duty_pct = 50; break;
+        case WAVE_SAW:  duty_pct = 80; break;
+        case WAVE_P10:  duty_pct = 10; break;
+        case WAVE_P25:  duty_pct = 25; break;
+        case WAVE_P75:  duty_pct = 75; break;
+        case WAVE_P90:  duty_pct = 90; break;
+        default:        duty_pct = 50; break;
+    }
 
     // 4. Calculate Timer Prescaler & AutoReload for Target Frequency
     uint32_t target_freq = SIGGEN_PRESETS[siggen_idx];
-    uint32_t timer_freq = target_freq * (uint32_t)dma_wave_len;
-
     uint32_t psc = 0;
-    uint32_t arr = 0;
+    uint32_t total_ticks = 0;
 
-    if (timer_freq < 1000) {
+    if (target_freq < 100) {
         psc = 319; // 32 MHz / 320 = 100 kHz timer clock
-        arr = (100000UL / timer_freq) - 1;
-    } else if (timer_freq < 10000) {
+        total_ticks = 100000UL / target_freq;
+    } else if (target_freq < 10000) {
         psc = 31; // 32 MHz / 32 = 1 MHz timer clock
-        arr = (1000000UL / timer_freq) - 1;
+        total_ticks = 1000000UL / target_freq;
     } else {
         psc = 0; // 32 MHz timer clock
-        arr = (32000000UL / timer_freq) - 1;
+        total_ticks = 32000000UL / target_freq;
     }
-    if (arr > 65535) arr = 65535;
-    if (arr < 1) arr = 1;
 
-    // 5. Route TIM6_UP to DMA1 Channel 2 (Request 9)
-    DMA1_CSELR->CSELR = (DMA1_CSELR->CSELR & ~DMA_CSELR_C2S_Msk) | (9U << DMA_CSELR_C2S_Pos);
+    uint32_t hi_ticks = (total_ticks * (uint32_t)duty_pct) / 100UL;
+    if (hi_ticks < 1) hi_ticks = 1;
+    if (hi_ticks >= total_ticks) hi_ticks = total_ticks - 1;
+    uint32_t lo_ticks = total_ticks - hi_ticks;
+    if (lo_ticks < 1) lo_ticks = 1;
 
-    // 6. Configure DMA1 Channel 2: Memory-to-Peripheral, Circular, 32-bit Words
-    DMA1_Channel2->CCR = 0;
-    DMA1_Channel2->CPAR = (uint32_t)&(GPIOB->BSRR);
-    DMA1_Channel2->CMAR = (uint32_t)dma_wave_buf;
-    DMA1_Channel2->CNDTR = dma_wave_len;
-    DMA1_Channel2->CCR = DMA_CCR_PL_1 | DMA_CCR_PL_0 | // Very High priority
-                         DMA_CCR_MSIZE_1 |             // 32-bit Memory word
-                         DMA_CCR_PSIZE_1 |             // 32-bit Peripheral word
-                         DMA_CCR_MINC |                // Memory increment
-                         DMA_CCR_CIRC |                // Circular looping
-                         DMA_CCR_DIR;                  // Read from memory, write to peripheral
-    DMA1_Channel2->CCR |= DMA_CCR_EN;
+    siggen_arr_hi = (uint16_t)(hi_ticks - 1);
+    siggen_arr_lo = (uint16_t)(lo_ticks - 1);
 
-    // 7. Start TIM6 with DMA Update Request Enabled
+    // 5. Configure TIM6 registers
     TIM6->PSC = (uint16_t)psc;
-    TIM6->ARR = (uint16_t)arr;
+    TIM6->ARR = siggen_arr_lo; // Start with low phase
     TIM6->EGR = TIM_EGR_UG;
     TIM6->SR = 0;
-    TIM6->DIER = TIM_DIER_UDE; // DMA request on update event (ZERO CPU INTERRUPTS!)
-    TIM6->CR1 = TIM_CR1_CEN;   // Counter enable
+    TIM6->DIER = TIM_DIER_UIE; // Enable update interrupt
+
+    NVIC_SetPriority(TIM6_DAC_IRQn, 0); // Highest priority for jitter-free output
+    NVIC_EnableIRQ(TIM6_DAC_IRQn);
+
+    TIM6->CR1 = TIM_CR1_CEN; // Counter enable
 }
 
 // ============================================================================
@@ -1387,6 +1353,9 @@ void setup() {
     // 1. Latch battery power ON
     pinMode(PIN_PWR_HOLD, OUTPUT);
     digitalWrite(PIN_PWR_HOLD, HIGH);
+
+    // Initialize RAM vector table for ultra-fast bare-metal timer interrupt
+    init_ram_vectors();
 
     // 2. LCD Backlight
     pinMode(PIN_BACKLIGHT, OUTPUT);
