@@ -92,23 +92,88 @@ static const uint32_t CANDIDATE_ZENER_EN[] = {
 static const size_t NUM_ZENER_EN = sizeof(CANDIDATE_ZENER_EN) / sizeof(CANDIDATE_ZENER_EN[0]);
 
 // ============================================================================
-// PROGRAMMABLE SIGNAL GENERATOR ENGINE (PB8 - TIM4_CH3)
+// ULTRA-LEAN HARDWARE TIMER (TIM7) SIGNAL GENERATOR (NO CPU CHOKE / ZERO TONE JITTER)
 // ============================================================================
 static const uint32_t SIGGEN_PRESETS[] = {
-    100, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000
+    10, 20, 50, 100, 200, 500, 1000, 1500, 2000, 2500, 3000, 5000, 10000
 };
 static const uint8_t NUM_SIGGEN_PRESETS = sizeof(SIGGEN_PRESETS) / sizeof(SIGGEN_PRESETS[0]);
-static uint8_t siggen_idx = 2; // Default 1000 Hz (1.0 kHz)
+static uint8_t siggen_idx = 6; // Default: 1000 Hz (1.0 kHz)
+
+static const uint8_t SIGGEN_DUTY_PRESETS[] = { 50, 10, 25, 75, 90 };
+static const uint8_t NUM_SIGGEN_DUTIES = sizeof(SIGGEN_DUTY_PRESETS) / sizeof(SIGGEN_DUTY_PRESETS[0]);
+static uint8_t siggen_duty_idx = 0; // Default: 50% (Symmetric Square)
+
 static bool siggen_on = false;
 
-static void update_siggen() {
-    if (siggen_on) {
-        tone(PIN_SIGGEN, SIGGEN_PRESETS[siggen_idx]);
+static volatile uint16_t siggen_arr_hi = 16000;
+static volatile uint16_t siggen_arr_lo = 16000;
+static volatile bool siggen_pin_state = false;
+
+static HardwareTimer *siggen_timer = nullptr;
+
+static void siggen_cb() {
+    siggen_pin_state = !siggen_pin_state;
+    if (siggen_pin_state) {
+        GPIOB->BSRR = (1U << 8); // PB8 HIGH (3.3V)
+        if (siggen_arr_hi != siggen_arr_lo) {
+            TIM7->ARR = siggen_arr_hi;
+        }
     } else {
-        noTone(PIN_SIGGEN);
+        GPIOB->BRR = (1U << 8);  // PB8 LOW (0.0V)
+        if (siggen_arr_hi != siggen_arr_lo) {
+            TIM7->ARR = siggen_arr_lo;
+        }
+    }
+}
+
+static void update_siggen() {
+    if (siggen_timer == nullptr) {
+        siggen_timer = new HardwareTimer(TIM7);
+    }
+
+    if (!siggen_on) {
+        siggen_timer->pause();
+        siggen_timer->detachInterrupt();
         pinMode(PIN_SIGGEN, OUTPUT);
         digitalWrite(PIN_SIGGEN, LOW);
+        siggen_pin_state = false;
+        return;
     }
+
+    pinMode(PIN_SIGGEN, OUTPUT);
+    digitalWrite(PIN_SIGGEN, LOW);
+    siggen_pin_state = false;
+
+    uint32_t freq = SIGGEN_PRESETS[siggen_idx];
+    uint8_t duty = SIGGEN_DUTY_PRESETS[siggen_duty_idx];
+
+    if (freq < 500) {
+        // Prescaler = 31 -> 1 MHz timer clock (1 us tick)
+        siggen_timer->setPrescaleFactor(32);
+        uint32_t period_us = 1000000UL / freq;
+        uint32_t hi_us = (period_us * duty) / 100;
+        uint32_t lo_us = period_us - hi_us;
+        if (hi_us == 0) hi_us = 1;
+        if (lo_us == 0) lo_us = 1;
+        siggen_arr_hi = (uint16_t)(hi_us - 1);
+        siggen_arr_lo = (uint16_t)(lo_us - 1);
+    } else {
+        // Prescaler = 0 -> 32 MHz timer clock (31.25 ns tick)
+        siggen_timer->setPrescaleFactor(1);
+        uint32_t period_ticks = 32000000UL / freq;
+        uint32_t hi_ticks = (period_ticks * duty) / 100;
+        uint32_t lo_ticks = period_ticks - hi_ticks;
+        if (hi_ticks == 0) hi_ticks = 1;
+        if (lo_ticks == 0) lo_ticks = 1;
+        siggen_arr_hi = (uint16_t)(hi_ticks - 1);
+        siggen_arr_lo = (uint16_t)(lo_ticks - 1);
+    }
+
+    siggen_timer->setOverflow(siggen_arr_lo, TICK_FORMAT);
+    siggen_timer->attachInterrupt(siggen_cb);
+    siggen_timer->refresh();
+    siggen_timer->resume();
 }
 
 // ============================================================================
@@ -127,7 +192,10 @@ static uint32_t sample_battery_mv() {
 static uint32_t sample_sma_mv() {
     uint32_t vcc = read_vcc_mv();
     uint32_t raw = adc_read_value(PA_6, 12);
-    return (raw * vcc) / 4095;
+    uint32_t vadc_mv = (raw * vcc) / 4095;
+    // Hardware input divider on SMA connector: 100k series + 27k to GND (Ratio: 127/27 = 4.704)
+    uint32_t vin_mv = (vadc_mv * 127UL) / 27UL;
+    return vin_mv;
 }
 
 // Instrument Modes: 0 = Tester, 1 = IR Decoder, 2 = Zener, 3 = SigGen & Voltmeter
@@ -1275,18 +1343,33 @@ void setup() {
     SerialUART1.begin(38400);
 #endif
 
+    // Ensure USART2 clock is disabled so PA2 and PA3 are purely ADC
+    if (__HAL_RCC_USART2_IS_CLK_ENABLED()) {
+        __HAL_RCC_USART2_CLK_DISABLE();
+    }
+    pinMode(PIN_BATT_ADC, INPUT_ANALOG);
+    pinMode(PIN_SMA_ADC, INPUT_ANALOG);
+
     // Initialize Zener boost & ADC sensor
     zener_init_probe();
     sample_zener();
 
-    // Probe PA2 (Battery sense) and PA6 (External voltage / resistance tap)
+    // Probe ALL candidate analog pins on STM32L083 to identify the battery divider
     uint32_t vcc_boot = read_vcc_mv();
-    uint32_t raw_pa2 = adc_read_value(PA_2, 12);
-    uint32_t mv_pa2 = (raw_pa2 * vcc_boot) / 4095;
-    uint32_t raw_pa6 = adc_read_value(PA_6, 12);
-    uint32_t mv_pa6 = (raw_pa6 * vcc_boot) / 4095;
-    rtt.printf(">> [ANALOG PROBE] PA2: %lu mV (raw %lu) | PA6: %lu mV (raw %lu) | VCC: %lu mV\n",
-               mv_pa2, raw_pa2, mv_pa6, raw_pa6, vcc_boot);
+    static const PinName PROBE_PINS[] = {
+        PA_0, PA_1, PA_2, PA_3, PA_4, PA_5, PA_6, PA_7,
+        PB_0, PB_1, PC_0, PC_1, PC_2, PC_3, PC_4, PC_5
+    };
+    static const char* const PROBE_NAMES[] = {
+        "PA0", "PA1", "PA2", "PA3", "PA4", "PA5", "PA6", "PA7",
+        "PB0", "PB1", "PC0", "PC1", "PC2", "PC3", "PC4", "PC5"
+    };
+    rtt.println(">> [ADC PIN SCAN] Probing all analog pins for Battery Divider:");
+    for (size_t i = 0; i < sizeof(PROBE_PINS)/sizeof(PROBE_PINS[0]); i++) {
+        uint32_t r = adc_read_value(PROBE_PINS[i], 12);
+        uint32_t mv = (r * vcc_boot) / 4095;
+        rtt.printf("   %s: %lu mV (raw %lu)\n", PROBE_NAMES[i], mv, r);
+    }
 
     rtt.println("\n\n========================================================");
     rtt.println("   FNIRSI DSO-TC2 COMPLETE HARDWARE ENGINE ONLINE       ");
@@ -1381,7 +1464,6 @@ void loop() {
 #if defined(USART1)
         SerialUART1.print(ir_pkt);
 #endif
-        Serial.print(ir_pkt);
     }
     bool ir_active = (millis() - ir_data.last_rx_ms < 400) || (micros() - ir_last_edge_us < 350000UL);
 
@@ -1445,13 +1527,19 @@ void loop() {
                 siggen_on = !siggen_on;
                 update_siggen();
                 beep_square(siggen_on ? 3600 : 1800, 30);
-                rtt.printf(">> [SIGGEN PB8] Output: %s (%lu Hz)\n",
-                           siggen_on ? "ON" : "OFF", SIGGEN_PRESETS[siggen_idx]);
+                rtt.printf(">> [SIGGEN PB8] Output: %s (%lu Hz, %u%% duty)\n",
+                           siggen_on ? "ON" : "OFF", SIGGEN_PRESETS[siggen_idx], SIGGEN_DUTY_PRESETS[siggen_duty_idx]);
+            }
+            if (btn_ok_db.pressed) {
+                siggen_duty_idx = (siggen_duty_idx + 1) % NUM_SIGGEN_DUTIES;
+                if (siggen_on) update_siggen();
+                beep_square(2800, 20);
+                rtt.printf(">> [SIGGEN PB8] Waveform / Duty Cycle: %u%%\n", SIGGEN_DUTY_PRESETS[siggen_duty_idx]);
             }
             if (up_pressed) {
                 if (siggen_idx < NUM_SIGGEN_PRESETS - 1) {
                     siggen_idx++;
-                    update_siggen();
+                    if (siggen_on) update_siggen();
                     beep_square(3200, 15);
                     rtt.printf(">> [SIGGEN PB8] Frequency UP -> %lu Hz\n", SIGGEN_PRESETS[siggen_idx]);
                 }
@@ -1459,7 +1547,7 @@ void loop() {
             if (down_pressed) {
                 if (siggen_idx > 0) {
                     siggen_idx--;
-                    update_siggen();
+                    if (siggen_on) update_siggen();
                     beep_square(2200, 15);
                     rtt.printf(">> [SIGGEN PB8] Frequency DOWN -> %lu Hz\n", SIGGEN_PRESETS[siggen_idx]);
                 }
@@ -1577,13 +1665,14 @@ void loop() {
         uint16_t sma_mv  = (uint16_t)sample_sma_mv();
 
         char buf[224];
-        snprintf(buf, sizeof(buf), "#TC2:%lu,%s,%s,%02X,%u,%lu,%lu,%s,%s,%s,%u,%u,%u,%lu,%s,%u,%u,%lu,%u,%u\n",
+        snprintf(buf, sizeof(buf), "#TC2:%lu,%s,%s,%02X,%u,%lu,%lu,%s,%s,%s,%u,%u,%u,%lu,%s,%u,%u,%lu,%u,%u,%u\n",
                  seq, active_btn, active_pin, btn_mask, backlight_level, vcc, millis(),
                  comp_res.type, comp_res.value, comp_res.pinout,
                  comp_res.s1_mv, comp_res.s2_mv, comp_res.s3_mv,
                  zener_res.zener_mv, zener_res.status,
                  batt_mv, sma_mv,
                  SIGGEN_PRESETS[siggen_idx], (unsigned int)(siggen_on ? 1 : 0),
+                 (unsigned int)SIGGEN_DUTY_PRESETS[siggen_duty_idx],
                  (unsigned int)instrument_mode);
 
 #if defined(USART1)

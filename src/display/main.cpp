@@ -42,9 +42,10 @@ struct L083Telemetry {
     uint16_t batt_mv;
     uint16_t sma_mv;
 
-    // Signal Generator (PB8 PWM)
+    // Signal Generator (PB8 TIM7 bare-metal PWM)
     uint32_t siggen_freq;
     uint8_t  siggen_on;
+    uint8_t  siggen_duty;
 
     // Active Instrument Mode (0 = Tester, 1 = IR Decoder, 2 = Zener, 3 = SigGen & Voltmeter)
     uint8_t  mode;
@@ -55,16 +56,44 @@ static L083Telemetry l083_data = {
     "NONE", "No component", "Pins 1-2-3 Open", 0, 0, 0,
     0, "STANDBY",
     3800, 0,
-    1000, 0,
+    1000, 0, 50,
     0
 };
 static char last_raw_pkt[64] = "Waiting for UART...";
 
-// Li-Po Battery Monitor (Updated live from STM32L083 PA2 2:1 divider telemetry)
+// Li-Po Battery Monitor (Direct bare-metal ADC1 register sampling on PA2, zero HAL overhead)
 static uint16_t batt_mv = 3800;
 static uint8_t  batt_pct = 75;
 static uint8_t  prev_batt_pct = 0xFF;
 static uint16_t prev_batt_mv = 0;
+
+static uint16_t adc_read_pa2_baremetal() {
+    RCC->APB2ENR |= RCC_APB2ENR_ADC1EN | RCC_APB2ENR_IOPAEN;
+    GPIOA->CRL &= ~(0xFU << 8); // PA2 analog mode (CNF=00, MODE=00)
+    ADC1->CR2 |= ADC_CR2_ADON;
+    ADC1->SQR3 = 2; // Channel 2 (PA2)
+    ADC1->CR2 |= ADC_CR2_ADON; // Start single conversion
+    uint32_t timeout = 2000;
+    while (!(ADC1->SR & ADC_SR_EOC) && --timeout);
+    return (uint16_t)ADC1->DR;
+}
+
+static void sample_battery_direct() {
+    static uint32_t last_batt_sample = 0;
+    if (millis() - last_batt_sample < 250) return;
+    last_batt_sample = millis();
+
+    uint32_t raw = adc_read_pa2_baremetal();
+    // PA2 is connected to the Li-Po battery via a 2:1 resistive divider
+    // Vbatt = Vadc * 2 = (raw * 3300 * 2) / 4095 = (raw * 6600) / 4095
+    uint32_t mv = (raw * 6600UL) / 4095UL;
+    if (mv >= 2500 && mv <= 4500) {
+        batt_mv = (uint16_t)mv;
+        if (batt_mv <= 3300) batt_pct = 0;
+        else if (batt_mv >= 4180) batt_pct = 100;
+        else batt_pct = (uint8_t)(((uint32_t)(batt_mv - 3300) * 100UL) / (4180UL - 3300UL));
+    }
+}
 
 static void draw_battery_indicator(bool force_redraw) {
     if (!force_redraw && batt_pct == prev_batt_pct && abs((int)batt_mv - (int)prev_batt_mv) < 30) {
@@ -172,14 +201,14 @@ static void parse_packet(const char* pkt) {
     unsigned int s1_v = 0, s2_v = 0, s3_v = 0;
     unsigned long zener_v = 0;
     char zener_stat_str[24] = "STANDBY";
-    unsigned int batt_v = 3800, sma_v = 0, sig_on = 0, sc_mode = 0;
+    unsigned int batt_v = 3800, sma_v = 0, sig_on = 0, sig_duty = 50, sc_mode = 0;
     unsigned long sig_f = 1000;
 
-    int n = sscanf(pkt + 5, "%lu,%23[^,],%15[^,],%x,%u,%lu,%lu,%15[^,],%23[^,],%27[^,],%u,%u,%u,%lu,%23[^,],%u,%u,%lu,%u,%u",
+    int n = sscanf(pkt + 5, "%lu,%23[^,],%15[^,],%x,%u,%lu,%lu,%15[^,],%23[^,],%27[^,],%u,%u,%u,%lu,%23[^,],%u,%u,%lu,%u,%u,%u",
                    &seq, btn_str, pin_str, &mask_val, &bl_val, &vcc, &uptime,
                    type_str, val_str, pinout_str, &s1_v, &s2_v, &s3_v,
                    &zener_v, zener_stat_str,
-                   &batt_v, &sma_v, &sig_f, &sig_on, &sc_mode);
+                   &batt_v, &sma_v, &sig_f, &sig_on, &sig_duty, &sc_mode);
 
     if (n >= 7) {
         l083_data.seq = seq;
@@ -205,11 +234,12 @@ static void parse_packet(const char* pkt) {
             l083_data.zener_mv = (uint32_t)zener_v;
             strncpy(l083_data.zener_status, zener_stat_str, sizeof(l083_data.zener_status) - 1);
         }
-        if (n >= 19) {
+        if (n >= 20) {
             l083_data.batt_mv = (uint16_t)batt_v;
             l083_data.sma_mv  = (uint16_t)sma_v;
             l083_data.siggen_freq = (uint32_t)sig_f;
             l083_data.siggen_on   = (uint8_t)sig_on;
+            l083_data.siggen_duty = (uint8_t)sig_duty;
             if (sc_mode < 4 && sc_mode != screen_mode) {
                 screen_mode = (uint8_t)sc_mode;
                 need_full_redraw = true;
@@ -626,25 +656,25 @@ static void draw_zener_graphic(uint32_t zener_mv, const char* status) {
     }
 }
 
-// Draw Dedicated UI Graphic for Programmable Signal Generator (PB8) & SMA Voltmeter (PA6)
-static void draw_siggen_graphic(uint32_t freq_hz, bool is_on, uint16_t sma_mv, bool redraw_all) {
-    // Card 1 Header inside Card 1 (Y: 26..136)
+// Draw Dedicated UI Graphic for Programmable Signal Generator (PB8) - Card 1 (Y: 26..136)
+static void draw_siggen_card(uint32_t freq_hz, bool is_on, uint8_t duty, bool redraw_all) {
     if (redraw_all) {
-        tft_print(12, 32, "PWM SIGNAL GENERATOR (PB8)", COLOR_CYAN, COLOR_BLACK, 1);
+        tft_print(12, 30, "PWM SIGNAL GENERATOR (PB8)", COLOR_CYAN, COLOR_BLACK, 1);
+        tft_print(16, 114, "UP/DN:Freq | OK:Wave Form | TEST:Out", COLOR_YELLOW, COLOR_BLACK, 1);
     }
 
-    // Output State Badge at (X: 190, Y: 46)
+    // Output State Badge at (X: 190, Y: 44)
     if (is_on) {
-        tft_fill_rect(190, 46, 116, 22, COLOR_GREEN);
-        tft_draw_rect(190, 46, 116, 22, COLOR_WHITE);
-        tft_print(200, 52, "OUTPUT: ON ", COLOR_BLACK, COLOR_GREEN, 1);
+        tft_fill_rect(190, 44, 116, 20, COLOR_GREEN);
+        tft_draw_rect(190, 44, 116, 20, COLOR_WHITE);
+        tft_print(200, 50, "OUTPUT: ON ", COLOR_BLACK, COLOR_GREEN, 1);
     } else {
-        tft_fill_rect(190, 46, 116, 22, 0x2104);
-        tft_draw_rect(190, 46, 116, 22, COLOR_DARKGREY);
-        tft_print(200, 52, "OUTPUT: OFF", COLOR_LIGHTGREY, 0x2104, 1);
+        tft_fill_rect(190, 44, 116, 20, 0x2104);
+        tft_draw_rect(190, 44, 116, 20, COLOR_DARKGREY);
+        tft_print(200, 50, "OUTPUT: OFF", COLOR_LIGHTGREY, 0x2104, 1);
     }
 
-    // Large Frequency Readout (Size 2, X: 16, Y: 48)
+    // Large Frequency Readout (Size 2, X: 16, Y: 46)
     char fbuf[24];
     if (freq_hz >= 1000) {
         uint32_t khz = freq_hz / 1000;
@@ -653,53 +683,69 @@ static void draw_siggen_graphic(uint32_t freq_hz, bool is_on, uint16_t sma_mv, b
     } else {
         snprintf(fbuf, sizeof(fbuf), "%4lu Hz     ", freq_hz);
     }
-    tft_print(16, 48, fbuf, COLOR_YELLOW, COLOR_BLACK, 2);
+    tft_print(16, 46, fbuf, COLOR_YELLOW, COLOR_BLACK, 2);
 
-    // Square wave graphic across (X: 16..296, Y: 76..106)
-    tft_fill_rect(16, 76, 284, 34, COLOR_BLACK);
+    // Waveform Form & Duty badge + Amplitude at Y: 66
+    char wbuf[32];
+    if (duty == 50) {
+        snprintf(wbuf, sizeof(wbuf), "Form: SQR (50%%)  ");
+    } else {
+        snprintf(wbuf, sizeof(wbuf), "Form: PULSE (%2u%%)", duty);
+    }
+    tft_print(16, 66, wbuf, COLOR_CYAN, COLOR_BLACK, 1);
+
+    tft_print(190, 66, is_on ? "Ampl: 3.3Vpp" : "Ampl: 0.0Vpp", is_on ? COLOR_WHITE : COLOR_DARKGREY, COLOR_BLACK, 1);
+
+    // Dynamic Waveform Graphic across (X: 16..296, Y: 78..104)
+    tft_fill_rect(16, 78, 284, 28, COLOR_BLACK);
     uint16_t wave_col = is_on ? COLOR_GREEN : COLOR_DARKGREY;
-    int16_t y_low = 104;
-    int16_t y_hi  = 78;
+    int16_t y_low = 103;
+    int16_t y_hi  = 80;
     int16_t x = 18;
-    int16_t pw = 28; // pulse width
-    while (x + pw * 2 < 296) {
-        tft_draw_hline(x, y_hi, pw, wave_col);
-        tft_draw_vline(x + pw, y_hi, y_low - y_hi, wave_col);
-        tft_draw_hline(x + pw, y_low, pw, wave_col);
-        tft_draw_vline(x + pw * 2, y_hi, y_low - y_hi, wave_col);
-        x += pw * 2;
+    int16_t period_w = 48;
+    int16_t hi_w = (period_w * (int16_t)duty) / 100;
+    if (hi_w < 4) hi_w = 4;
+    if (hi_w > period_w - 4) hi_w = period_w - 4;
+    int16_t lo_w = period_w - hi_w;
+
+    while (x + period_w < 296) {
+        tft_draw_hline(x, y_hi, hi_w, wave_col);
+        tft_draw_vline(x + hi_w, y_hi, y_low - y_hi, wave_col);
+        tft_draw_hline(x + hi_w, y_low, lo_w, wave_col);
+        tft_draw_vline(x + period_w, y_hi, y_low - y_hi, wave_col);
+        x += period_w;
     }
+}
 
-    // Hint footer inside Card 1
-    tft_print(16, 118, "UP/DN: Frequency | TEST: Output Toggle", COLOR_YELLOW, COLOR_BLACK, 1);
-
-    // Card 2: SMA External Voltmeter (Y: 138..236)
+// Draw Dedicated UI Graphic for SMA Voltmeter (PA6) - Card 2 (Y: 138..236)
+static void draw_voltmeter_card(uint16_t sma_mv, bool redraw_all) {
     if (redraw_all) {
-        tft_print(12, 144, "SMA EXTERNAL VOLTMETER (PA6 - Pin 22)", COLOR_YELLOW, COLOR_BLACK, 1);
+        tft_print(12, 142, "SMA EXTERNAL VOLTMETER (0 - 16.0V)", COLOR_YELLOW, COLOR_BLACK, 1);
+        tft_draw_rect(16, 180, 280, 12, COLOR_WHITE);
+        tft_print(16, 196, "0.0V", COLOR_LIGHTGREY, COLOR_BLACK, 1);
+        tft_print(70, 196, "3.3V", COLOR_CYAN, COLOR_BLACK, 1);
+        tft_print(102, 196, "5.0V", COLOR_GREEN, COLOR_BLACK, 1);
+        tft_print(200, 196, "12V", COLOR_YELLOW, COLOR_BLACK, 1);
+        tft_print(260, 196, "16V+", COLOR_RED, COLOR_BLACK, 1);
     }
 
-    // Large Voltage Readout (Size 2, X: 16, Y: 160)
+    // Large Voltage Readout (Size 2, X: 16, Y: 156)
     char vbuf[32];
     uint32_t v_int = sma_mv / 1000;
     uint32_t v_dec = (sma_mv % 1000) / 10;
-    snprintf(vbuf, sizeof(vbuf), "V_in = %lu.%02lu V   ", v_int, v_dec);
-    tft_print(16, 160, vbuf, COLOR_CYAN, COLOR_BLACK, 2);
+    snprintf(vbuf, sizeof(vbuf), "V_in = %2lu.%02lu V   ", v_int, v_dec);
+    tft_print(16, 156, vbuf, COLOR_CYAN, COLOR_BLACK, 2);
 
-    // Visual Analog Bargraph (X: 16..296, Y: 184, W: 280, H: 12)
-    tft_draw_rect(16, 184, 280, 12, COLOR_WHITE);
-    uint16_t bar_w = (sma_mv > 3300) ? 276 : (uint16_t)(((uint32_t)sma_mv * 276UL) / 3300UL);
+    // Visual Analog Bargraph (X: 16..296, Y: 180, W: 280, H: 12)
+    // 0 to 16,000 mV full scale
+    uint16_t bar_w = (sma_mv > 16000) ? 276 : (uint16_t)(((uint32_t)sma_mv * 276UL) / 16000UL);
     if (bar_w > 0) {
-        uint16_t b_col = (sma_mv > 2800) ? COLOR_RED : (sma_mv > 1500) ? COLOR_YELLOW : COLOR_GREEN;
-        tft_fill_rect(18, 186, bar_w, 8, b_col);
+        uint16_t b_col = (sma_mv > 12000) ? COLOR_RED : (sma_mv > 5000) ? COLOR_YELLOW : COLOR_GREEN;
+        tft_fill_rect(18, 182, bar_w, 8, b_col);
     }
     if (bar_w < 276) {
-        tft_fill_rect(18 + bar_w, 186, 276 - bar_w, 8, COLOR_BLACK);
+        tft_fill_rect(18 + bar_w, 182, 276 - bar_w, 8, COLOR_BLACK);
     }
-
-    // Scale markers below bar
-    tft_print(16, 198, "0.0V", COLOR_LIGHTGREY, COLOR_BLACK, 1);
-    tft_print(144, 198, "1.65V", COLOR_LIGHTGREY, COLOR_BLACK, 1);
-    tft_print(266, 198, "3.3V+", COLOR_LIGHTGREY, COLOR_BLACK, 1);
 
     // Telemetry Footer
     char tbuf[48];
@@ -774,6 +820,7 @@ static void draw_screen_background() {
 }
 
 void setup() {
+    sample_battery_direct();
     tft_init();
     Serial1.setRx(PA10);
     Serial1.setTx(PA9);
@@ -783,6 +830,7 @@ void setup() {
 
 void loop() {
     poll_uart();
+    sample_battery_direct();
 
     if (need_full_redraw) {
         draw_screen_background();
@@ -869,9 +917,9 @@ void loop() {
                 prev_s3 = l083_data.s3_mv;
             }
 
-            tft_print(12, 184, "RL: 680R (PA7,PB1,PB10) | RH: 470k", COLOR_YELLOW, COLOR_BLACK, 1);
-            tft_print(12, 198, "Sense: PA3(1), PA4(2), PA5(3)     ", COLOR_CYAN, COLOR_BLACK, 1);
-            tft_print(12, 212, "TEST=Measure | MENU=Switch IR Dec ", 0x07E0, COLOR_BLACK, 1);
+            tft_print(12, 184, "Auto: BJT/MOS/Diode/RLC/1-Wire/DHT", COLOR_YELLOW, COLOR_BLACK, 1);
+            tft_print(12, 198, "Plug in 1-2-3 ZIF Socket & Press >", COLOR_CYAN, COLOR_BLACK, 1);
+            tft_print(12, 212, "TEST(>)=Measure | MENU=Next Screen", 0x07E0, COLOR_BLACK, 1);
 
             if (l083_data.connected) {
                 snprintf(buf, sizeof(buf), "VCC:%lu.%02luV | BATT:%lu.%02luV (%u%%)  ",
@@ -1023,18 +1071,27 @@ void loop() {
             // ================================================================
             static uint32_t prev_sig_freq = 0xFFFFFFFF;
             static uint8_t  prev_sig_on   = 0xFF;
+            static uint8_t  prev_sig_duty = 0xFF;
             static uint16_t prev_sma_mv   = 0xFFFF;
 
-            bool freq_changed = (l083_data.siggen_freq != prev_sig_freq);
-            bool state_changed = (l083_data.siggen_on != prev_sig_on);
-            bool sma_changed = (abs((int)l083_data.sma_mv - (int)prev_sma_mv) > 20);
+            bool siggen_changed = (need_full_redraw ||
+                                   l083_data.siggen_freq != prev_sig_freq ||
+                                   l083_data.siggen_on   != prev_sig_on   ||
+                                   l083_data.siggen_duty != prev_sig_duty);
 
-            if (need_full_redraw || freq_changed || state_changed || sma_changed) {
-                draw_siggen_graphic(l083_data.siggen_freq, l083_data.siggen_on != 0,
-                                    l083_data.sma_mv, need_full_redraw);
+            bool sma_changed = (need_full_redraw || abs((int)l083_data.sma_mv - (int)prev_sma_mv) >= 30);
+
+            if (siggen_changed) {
+                draw_siggen_card(l083_data.siggen_freq, l083_data.siggen_on != 0,
+                                 l083_data.siggen_duty, need_full_redraw);
                 prev_sig_freq = l083_data.siggen_freq;
                 prev_sig_on   = l083_data.siggen_on;
-                prev_sma_mv   = l083_data.sma_mv;
+                prev_sig_duty = l083_data.siggen_duty;
+            }
+
+            if (sma_changed) {
+                draw_voltmeter_card(l083_data.sma_mv, need_full_redraw);
+                prev_sma_mv = l083_data.sma_mv;
             }
             poll_uart();
         }
