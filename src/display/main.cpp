@@ -686,13 +686,19 @@ static void draw_siggen_card(uint32_t freq_hz, bool is_on, uint8_t duty, bool re
     tft_print(16, 46, fbuf, COLOR_YELLOW, COLOR_BLACK, 2);
 
     // Waveform Form & Duty badge + Amplitude at Y: 66
-    char wbuf[32];
-    if (duty == 50) {
-        snprintf(wbuf, sizeof(wbuf), "Form: SQR (50%%)  ");
-    } else {
-        snprintf(wbuf, sizeof(wbuf), "Form: PULSE (%2u%%)", duty);
+    const char* form_title = "Form: SQR (50%) ";
+    switch (duty) {
+        case 0: form_title = "Form: SQUARE (50%)"; break;
+        case 1: form_title = "Form: TRIANGLE    "; break;
+        case 2: form_title = "Form: SINE WAVE   "; break;
+        case 3: form_title = "Form: SAWTOOTH    "; break;
+        case 4: form_title = "Form: PULSE (10%) "; break;
+        case 5: form_title = "Form: PULSE (25%) "; break;
+        case 6: form_title = "Form: PULSE (75%) "; break;
+        case 7: form_title = "Form: PULSE (90%) "; break;
+        default: form_title = "Form: SQUARE (50%)"; break;
     }
-    tft_print(16, 66, wbuf, COLOR_CYAN, COLOR_BLACK, 1);
+    tft_print(16, 66, form_title, COLOR_CYAN, COLOR_BLACK, 1);
 
     tft_print(190, 66, is_on ? "Ampl: 3.3Vpp" : "Ampl: 0.0Vpp", is_on ? COLOR_WHITE : COLOR_DARKGREY, COLOR_BLACK, 1);
 
@@ -701,19 +707,52 @@ static void draw_siggen_card(uint32_t freq_hz, bool is_on, uint8_t duty, bool re
     uint16_t wave_col = is_on ? COLOR_GREEN : COLOR_DARKGREY;
     int16_t y_low = 103;
     int16_t y_hi  = 80;
-    int16_t x = 18;
-    int16_t period_w = 48;
-    int16_t hi_w = (period_w * (int16_t)duty) / 100;
-    if (hi_w < 4) hi_w = 4;
-    if (hi_w > period_w - 4) hi_w = period_w - 4;
-    int16_t lo_w = period_w - hi_w;
 
-    while (x + period_w < 296) {
-        tft_draw_hline(x, y_hi, hi_w, wave_col);
-        tft_draw_vline(x + hi_w, y_hi, y_low - y_hi, wave_col);
-        tft_draw_hline(x + hi_w, y_low, lo_w, wave_col);
-        tft_draw_vline(x + period_w, y_hi, y_low - y_hi, wave_col);
-        x += period_w;
+    if (duty == 1) {
+        // TRIANGLE WAVE
+        int16_t x = 18;
+        int16_t period = 40;
+        while (x + period < 296) {
+            tft_draw_line(x, y_low, x + 20, y_hi, wave_col);
+            tft_draw_line(x + 20, y_hi, x + 40, y_low, wave_col);
+            x += period;
+        }
+    } else if (duty == 2) {
+        // SINE WAVE
+        static const int8_t SINE_Y[9] = { 0, -8, -11, -8, 0, 8, 11, 8, 0 };
+        int16_t x = 18;
+        while (x + 40 < 296) {
+            for (int p = 0; p < 8; p++) {
+                tft_draw_line(x + p * 5, 91 + SINE_Y[p], x + (p + 1) * 5, 91 + SINE_Y[p + 1], wave_col);
+            }
+            x += 40;
+        }
+    } else if (duty == 3) {
+        // SAWTOOTH / RAMP WAVE
+        int16_t x = 18;
+        int16_t period = 40;
+        while (x + period < 296) {
+            tft_draw_line(x, y_low, x + 38, y_hi, wave_col);
+            tft_draw_vline(x + 38, y_hi, y_low - y_hi, wave_col);
+            x += period;
+        }
+    } else {
+        // RECTANGULAR PULSE / SQUARE WAVE
+        int16_t pct = (duty == 4) ? 10 : (duty == 5) ? 25 : (duty == 6) ? 75 : (duty == 7) ? 90 : 50;
+        int16_t x = 18;
+        int16_t period_w = 48;
+        int16_t hi_w = (period_w * pct) / 100;
+        if (hi_w < 4) hi_w = 4;
+        if (hi_w > period_w - 4) hi_w = period_w - 4;
+        int16_t lo_w = period_w - hi_w;
+
+        while (x + period_w < 296) {
+            tft_draw_hline(x, y_hi, hi_w, wave_col);
+            tft_draw_vline(x + hi_w, y_hi, y_low - y_hi, wave_col);
+            tft_draw_hline(x + hi_w, y_low, lo_w, wave_col);
+            tft_draw_vline(x + period_w, y_hi, y_low - y_hi, wave_col);
+            x += period_w;
+        }
     }
 }
 

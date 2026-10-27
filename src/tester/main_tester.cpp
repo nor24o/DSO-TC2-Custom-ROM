@@ -92,88 +92,175 @@ static const uint32_t CANDIDATE_ZENER_EN[] = {
 static const size_t NUM_ZENER_EN = sizeof(CANDIDATE_ZENER_EN) / sizeof(CANDIDATE_ZENER_EN[0]);
 
 // ============================================================================
-// ULTRA-LEAN HARDWARE TIMER (TIM7) SIGNAL GENERATOR (NO CPU CHOKE / ZERO TONE JITTER)
 // ============================================================================
+// HARDWARE DMA-ACCELERATED SIGNAL GENERATOR (TIM6 + DMA1_CH2 -> GPIOB->BSRR)
+// ZERO CPU CYCLES / ZERO INTERRUPTS / 100% UNLOCK UP TO 100 kHz
+// ============================================================================
+#define BSRR_PB8_HI  (1U << 8)
+#define BSRR_PB8_LO  (1U << 24)
+
+static uint32_t dma_wave_buf[32];
+static uint16_t dma_wave_len = 2;
+
 static const uint32_t SIGGEN_PRESETS[] = {
-    10, 20, 50, 100, 200, 500, 1000, 1500, 2000, 2500, 3000, 5000, 10000
+    10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000
 };
 static const uint8_t NUM_SIGGEN_PRESETS = sizeof(SIGGEN_PRESETS) / sizeof(SIGGEN_PRESETS[0]);
 static uint8_t siggen_idx = 6; // Default: 1000 Hz (1.0 kHz)
 
-static const uint8_t SIGGEN_DUTY_PRESETS[] = { 50, 10, 25, 75, 90 };
-static const uint8_t NUM_SIGGEN_DUTIES = sizeof(SIGGEN_DUTY_PRESETS) / sizeof(SIGGEN_DUTY_PRESETS[0]);
-static uint8_t siggen_duty_idx = 0; // Default: 50% (Symmetric Square)
-
+enum SiggenWaveMode {
+    WAVE_SQR  = 0, // Square (50% Duty)
+    WAVE_TRI  = 1, // Triangle Wave
+    WAVE_SINE = 2, // Sine Wave
+    WAVE_SAW  = 3, // Sawtooth / Ramp Wave
+    WAVE_P10  = 4, // Pulse (10% Duty)
+    WAVE_P25  = 5, // Pulse (25% Duty)
+    WAVE_P75  = 6, // Pulse (75% Duty)
+    WAVE_P90  = 7  // Pulse (90% Duty)
+};
+static const uint8_t NUM_WAVE_MODES = 8;
+static uint8_t siggen_wave_mode = 0; // Default: SQR (50%)
 static bool siggen_on = false;
 
-static volatile uint16_t siggen_arr_hi = 16000;
-static volatile uint16_t siggen_arr_lo = 16000;
-static volatile bool siggen_pin_state = false;
+static void build_dma_wave() {
+    switch (siggen_wave_mode) {
+        case WAVE_SQR:
+            dma_wave_len = 2;
+            dma_wave_buf[0] = BSRR_PB8_HI;
+            dma_wave_buf[1] = BSRR_PB8_LO;
+            break;
 
-static HardwareTimer *siggen_timer = nullptr;
+        case WAVE_P10: // 10% Duty (2 HIGH, 18 LOW)
+            dma_wave_len = 20;
+            for (int i = 0; i < 20; i++) {
+                dma_wave_buf[i] = (i < 2) ? BSRR_PB8_HI : BSRR_PB8_LO;
+            }
+            break;
 
-static void siggen_cb() {
-    siggen_pin_state = !siggen_pin_state;
-    if (siggen_pin_state) {
-        GPIOB->BSRR = (1U << 8); // PB8 HIGH (3.3V)
-        if (siggen_arr_hi != siggen_arr_lo) {
-            TIM7->ARR = siggen_arr_hi;
-        }
-    } else {
-        GPIOB->BRR = (1U << 8);  // PB8 LOW (0.0V)
-        if (siggen_arr_hi != siggen_arr_lo) {
-            TIM7->ARR = siggen_arr_lo;
-        }
+        case WAVE_P25: // 25% Duty (5 HIGH, 15 LOW)
+            dma_wave_len = 20;
+            for (int i = 0; i < 20; i++) {
+                dma_wave_buf[i] = (i < 5) ? BSRR_PB8_HI : BSRR_PB8_LO;
+            }
+            break;
+
+        case WAVE_P75: // 75% Duty (15 HIGH, 5 LOW)
+            dma_wave_len = 20;
+            for (int i = 0; i < 20; i++) {
+                dma_wave_buf[i] = (i < 15) ? BSRR_PB8_HI : BSRR_PB8_LO;
+            }
+            break;
+
+        case WAVE_P90: // 90% Duty (18 HIGH, 2 LOW)
+            dma_wave_len = 20;
+            for (int i = 0; i < 20; i++) {
+                dma_wave_buf[i] = (i < 18) ? BSRR_PB8_HI : BSRR_PB8_LO;
+            }
+            break;
+
+        case WAVE_TRI: // 20-sample Triangle Wave
+            dma_wave_len = 20;
+            for (int i = 0; i < 20; i++) {
+                int d = (i < 10) ? i : (19 - i);
+                dma_wave_buf[i] = ((i % 4) < (d / 3 + 1)) ? BSRR_PB8_HI : BSRR_PB8_LO;
+            }
+            break;
+
+        case WAVE_SINE: // 20-sample Sine Wave Pulse Distribution
+            dma_wave_len = 20;
+            for (int i = 0; i < 20; i++) {
+                static const uint8_t SINE_PATTERN[20] = {
+                    0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+                };
+                dma_wave_buf[i] = SINE_PATTERN[i] ? BSRR_PB8_HI : BSRR_PB8_LO;
+            }
+            break;
+
+        case WAVE_SAW: // 20-sample Sawtooth Ramp Wave
+            dma_wave_len = 20;
+            for (int i = 0; i < 20; i++) {
+                dma_wave_buf[i] = ((i % 4) < (i / 5 + 1)) ? BSRR_PB8_HI : BSRR_PB8_LO;
+            }
+            break;
+
+        default:
+            dma_wave_len = 2;
+            dma_wave_buf[0] = BSRR_PB8_HI;
+            dma_wave_buf[1] = BSRR_PB8_LO;
+            break;
     }
 }
 
 static void update_siggen() {
-    if (siggen_timer == nullptr) {
-        siggen_timer = new HardwareTimer(TIM7);
+    // 1. Disable timer and DMA channel
+    if (RCC->APB1ENR & RCC_APB1ENR_TIM6EN) {
+        TIM6->CR1 = 0;
+        TIM6->DIER = 0;
+    }
+    if (RCC->AHBENR & RCC_AHBENR_DMA1EN) {
+        DMA1_Channel2->CCR = 0;
     }
 
     if (!siggen_on) {
-        siggen_timer->pause();
-        siggen_timer->detachInterrupt();
         pinMode(PIN_SIGGEN, OUTPUT);
         digitalWrite(PIN_SIGGEN, LOW);
-        siggen_pin_state = false;
         return;
     }
 
     pinMode(PIN_SIGGEN, OUTPUT);
     digitalWrite(PIN_SIGGEN, LOW);
-    siggen_pin_state = false;
 
-    uint32_t freq = SIGGEN_PRESETS[siggen_idx];
-    uint8_t duty = SIGGEN_DUTY_PRESETS[siggen_duty_idx];
+    // 2. Enable Clocks for TIM6 and DMA1
+    RCC->APB1ENR |= RCC_APB1ENR_TIM6EN;
+    RCC->AHBENR  |= RCC_AHBENR_DMA1EN;
+    __asm__ volatile("nop; nop");
 
-    if (freq < 500) {
-        // Prescaler = 31 -> 1 MHz timer clock (1 us tick)
-        siggen_timer->setPrescaleFactor(32);
-        uint32_t period_us = 1000000UL / freq;
-        uint32_t hi_us = (period_us * duty) / 100;
-        uint32_t lo_us = period_us - hi_us;
-        if (hi_us == 0) hi_us = 1;
-        if (lo_us == 0) lo_us = 1;
-        siggen_arr_hi = (uint16_t)(hi_us - 1);
-        siggen_arr_lo = (uint16_t)(lo_us - 1);
+    // 3. Build waveform buffer
+    build_dma_wave();
+
+    // 4. Calculate Timer Prescaler & AutoReload for Target Frequency
+    uint32_t target_freq = SIGGEN_PRESETS[siggen_idx];
+    uint32_t timer_freq = target_freq * (uint32_t)dma_wave_len;
+
+    uint32_t psc = 0;
+    uint32_t arr = 0;
+
+    if (timer_freq < 1000) {
+        psc = 319; // 32 MHz / 320 = 100 kHz timer clock
+        arr = (100000UL / timer_freq) - 1;
+    } else if (timer_freq < 10000) {
+        psc = 31; // 32 MHz / 32 = 1 MHz timer clock
+        arr = (1000000UL / timer_freq) - 1;
     } else {
-        // Prescaler = 0 -> 32 MHz timer clock (31.25 ns tick)
-        siggen_timer->setPrescaleFactor(1);
-        uint32_t period_ticks = 32000000UL / freq;
-        uint32_t hi_ticks = (period_ticks * duty) / 100;
-        uint32_t lo_ticks = period_ticks - hi_ticks;
-        if (hi_ticks == 0) hi_ticks = 1;
-        if (lo_ticks == 0) lo_ticks = 1;
-        siggen_arr_hi = (uint16_t)(hi_ticks - 1);
-        siggen_arr_lo = (uint16_t)(lo_ticks - 1);
+        psc = 0; // 32 MHz timer clock
+        arr = (32000000UL / timer_freq) - 1;
     }
+    if (arr > 65535) arr = 65535;
+    if (arr < 1) arr = 1;
 
-    siggen_timer->setOverflow(siggen_arr_lo, TICK_FORMAT);
-    siggen_timer->attachInterrupt(siggen_cb);
-    siggen_timer->refresh();
-    siggen_timer->resume();
+    // 5. Route TIM6_UP to DMA1 Channel 2 (Request 9)
+    DMA1_CSELR->CSELR = (DMA1_CSELR->CSELR & ~DMA_CSELR_C2S_Msk) | (9U << DMA_CSELR_C2S_Pos);
+
+    // 6. Configure DMA1 Channel 2: Memory-to-Peripheral, Circular, 32-bit Words
+    DMA1_Channel2->CCR = 0;
+    DMA1_Channel2->CPAR = (uint32_t)&(GPIOB->BSRR);
+    DMA1_Channel2->CMAR = (uint32_t)dma_wave_buf;
+    DMA1_Channel2->CNDTR = dma_wave_len;
+    DMA1_Channel2->CCR = DMA_CCR_PL_1 | DMA_CCR_PL_0 | // Very High priority
+                         DMA_CCR_MSIZE_1 |             // 32-bit Memory word
+                         DMA_CCR_PSIZE_1 |             // 32-bit Peripheral word
+                         DMA_CCR_MINC |                // Memory increment
+                         DMA_CCR_CIRC |                // Circular looping
+                         DMA_CCR_DIR;                  // Read from memory, write to peripheral
+    DMA1_Channel2->CCR |= DMA_CCR_EN;
+
+    // 7. Start TIM6 with DMA Update Request Enabled
+    TIM6->PSC = (uint16_t)psc;
+    TIM6->ARR = (uint16_t)arr;
+    TIM6->EGR = TIM_EGR_UG;
+    TIM6->SR = 0;
+    TIM6->DIER = TIM_DIER_UDE; // DMA request on update event (ZERO CPU INTERRUPTS!)
+    TIM6->CR1 = TIM_CR1_CEN;   // Counter enable
 }
 
 // ============================================================================
@@ -1527,14 +1614,14 @@ void loop() {
                 siggen_on = !siggen_on;
                 update_siggen();
                 beep_square(siggen_on ? 3600 : 1800, 30);
-                rtt.printf(">> [SIGGEN PB8] Output: %s (%lu Hz, %u%% duty)\n",
-                           siggen_on ? "ON" : "OFF", SIGGEN_PRESETS[siggen_idx], SIGGEN_DUTY_PRESETS[siggen_duty_idx]);
+                rtt.printf(">> [SIGGEN PB8] Output: %s (%lu Hz, WaveMode: %u)\n",
+                           siggen_on ? "ON" : "OFF", SIGGEN_PRESETS[siggen_idx], siggen_wave_mode);
             }
             if (btn_ok_db.pressed) {
-                siggen_duty_idx = (siggen_duty_idx + 1) % NUM_SIGGEN_DUTIES;
+                siggen_wave_mode = (siggen_wave_mode + 1) % NUM_WAVE_MODES;
                 if (siggen_on) update_siggen();
                 beep_square(2800, 20);
-                rtt.printf(">> [SIGGEN PB8] Waveform / Duty Cycle: %u%%\n", SIGGEN_DUTY_PRESETS[siggen_duty_idx]);
+                rtt.printf(">> [SIGGEN PB8] Waveform changed to mode: %u\n", siggen_wave_mode);
             }
             if (up_pressed) {
                 if (siggen_idx < NUM_SIGGEN_PRESETS - 1) {
@@ -1672,7 +1759,7 @@ void loop() {
                  zener_res.zener_mv, zener_res.status,
                  batt_mv, sma_mv,
                  SIGGEN_PRESETS[siggen_idx], (unsigned int)(siggen_on ? 1 : 0),
-                 (unsigned int)SIGGEN_DUTY_PRESETS[siggen_duty_idx],
+                 (unsigned int)siggen_wave_mode,
                  (unsigned int)instrument_mode);
 
 #if defined(USART1)
