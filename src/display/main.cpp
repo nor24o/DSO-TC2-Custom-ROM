@@ -871,15 +871,16 @@ void loop() {
     poll_uart();
     sample_battery_direct();
 
-    if (need_full_redraw) {
-        draw_screen_background();
-        need_full_redraw = false;
-    }
-
     static uint32_t last_ui = 0;
-    if (millis() - last_ui >= 40) { // 25 Hz UI refresh
+    bool ui_timer_ready = (millis() - last_ui >= 40);
+
+    if (need_full_redraw || ui_timer_ready) {
         last_ui = millis();
-        poll_uart();
+
+        if (need_full_redraw) {
+            draw_screen_background();
+        }
+
         draw_battery_indicator(need_full_redraw);
 
         uint8_t m = l083_data.btn_mask;
@@ -1134,5 +1135,7 @@ void loop() {
             }
             poll_uart();
         }
+
+        need_full_redraw = false;
     }
 }
